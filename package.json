@@ -1,0 +1,9 @@
+{
+  "name": "codex-switch-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local web UI for manual Codex profile switching",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

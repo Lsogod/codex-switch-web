@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Codex Switch Web</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Local Control Console</p>
+          <h1>Codex 账号切换台</h1>
+          <p class="lede">
+            管理你机器上的 <code>~/.codex</code> 和 <code>~/.codex-profiles</code>，
+            集中完成登录、登出、切换和清理本地账号配置。
+          </p>
+          <div class="hero-tags">
+            <span class="hero-tag">本地配置管理</span>
+            <span class="hero-tag">自动保存账号</span>
+            <span class="hero-tag">额度状态可视化</span>
+          </div>
+        </div>
+        <div class="hero-note">
+          <span class="hero-note-label">操作边界</span>
+          <strong>只处理本机 profile 与 session</strong>
+          <p>页面只展示可安全读取的本地元信息，不会把 token 明文暴露到界面。</p>
+        </div>
+      </section>
+
+      <section class="summary">
+        <div class="summary-card">
+          <span class="label">当前 profile</span>
+          <strong id="activeProfile">加载中</strong>
+        </div>
+        <div class="summary-card">
+          <span class="label">受管目录</span>
+          <strong id="profilesDir">加载中</strong>
+        </div>
+        <div class="summary-card">
+          <span class="label">登录状态</span>
+          <strong id="loginStatus">加载中</strong>
+        </div>
+        <div class="summary-card">
+          <span class="label">当前账号</span>
+          <strong id="activeAccountEmail">加载中</strong>
+          <small id="activeAccountMeta" class="muted">-</small>
+        </div>
+        <div class="summary-card summary-card-usage">
+          <span class="label">当前额度</span>
+          <strong id="activeUsageTitle">加载中</strong>
+          <small id="activeUsageMeta" class="muted">-</small>
+          <div class="summary-meter">
+            <div id="activeUsageMeterBar" class="summary-meter-bar"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <span class="section-kicker">Action Center</span>
+            <h2>常用操作</h2>
+          </div>
+          <p>登录完成后，页面会自动把当前账号保存成 profile，并用邮箱命名。</p>
+        </div>
+        <p class="helper-text">
+          执行切换、登录或登出前，如果检测到 Codex 相关进程仍在运行，页面会先提醒你，并在你同意后代为关闭再继续。
+        </p>
+        <div class="auto-switch-box">
+          <div class="auto-switch-copy">
+            <span class="section-kicker">Auto Switch</span>
+            <strong id="autoSwitchTitle">自动切号未启用</strong>
+            <p id="autoSwitchMeta" class="muted">会持续检测当前账号额度，用尽后按优先级自动切换。</p>
+          </div>
+          <button id="autoSwitchToggleButton" class="button secondary" type="button">开启自动切号</button>
+        </div>
+        <div class="inline-actions top-actions">
+          <button id="startLoginButton" class="button" type="button">CLI 登录</button>
+          <button id="startDeviceLoginButton" class="button secondary" type="button">设备码登录</button>
+          <button id="logoutButton" class="button secondary small danger" type="button">CLI 登出</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <span class="section-kicker">Profiles</span>
+            <h2>账号列表</h2>
+          </div>
+          <p>按建议使用优先级从上到下排序，显示的是本地可安全提取的元信息，不会把 token 明文展示在页面里。</p>
+        </div>
+        <div id="profilesGrid" class="profiles-grid"></div>
+      </section>
+
+      <div id="toast" class="toast hidden"></div>
+    </main>
+
+    <template id="profileTemplate">
+      <article class="profile-card">
+        <div class="card-top">
+          <div class="card-main">
+            <div class="card-title-row">
+              <h3 class="profile-name"></h3>
+              <span class="chip active-chip hidden">当前</span>
+            </div>
+            <p class="profile-email muted"></p>
+          </div>
+          <div class="card-side">
+            <div class="priority-strip">
+              <div>
+                <span class="priority-kicker">使用建议</span>
+                <p class="priority-note">等待额度分析</p>
+              </div>
+              <span class="priority-chip">待确认</span>
+            </div>
+            <div class="card-actions">
+              <button class="button small use-button">切换到此账号</button>
+              <button class="button secondary small danger delete-button" type="button">删除</button>
+            </div>
+          </div>
+        </div>
+
+        <dl class="facts">
+          <div>
+            <dt>显示名</dt>
+            <dd class="fact-name">-</dd>
+          </div>
+          <div>
+            <dt>登录模式</dt>
+            <dd class="fact-auth-mode">-</dd>
+          </div>
+          <div>
+            <dt>套餐类型</dt>
+            <dd class="fact-plan">-</dd>
+          </div>
+          <div>
+            <dt>最后刷新</dt>
+            <dd class="fact-refresh">-</dd>
+          </div>
+          <div>
+            <dt>本地路径</dt>
+            <dd class="fact-path">-</dd>
+          </div>
+        </dl>
+
+        <div class="usage-box">
+          <div class="usage-hero">
+            <div>
+              <strong class="usage-title">剩余额度</strong>
+              <p class="usage-note"></p>
+            </div>
+            <span class="usage-badge">--</span>
+          </div>
+          <div class="usage-lines"></div>
+        </div>
+      </article>
+    </template>
+
+    <script src="/app.js"></script>
+  </body>
+  </html>

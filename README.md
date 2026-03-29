@@ -38,6 +38,7 @@
 - 各 profile 继续保留自己的账号配置，例如 `auth.json`、`config.toml`
 - thread/session 历史在切换前会合并到 `~/.codex-profiles/.shared-sessions`
 - 各 profile 的相关历史文件会链接到共享目录
+- 桌面端的 `/.codex-global-state.json` 也会合并成共享状态，尽量保留 workspace 列表和侧边栏视图
 - 因此切换账号后不会因为 `~/.codex` 指向变化而丢失旧会话
 
 ## 环境要求

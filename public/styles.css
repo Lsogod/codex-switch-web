@@ -871,6 +871,7 @@ dd {
   .auto-switch-box,
   .card-top,
   .card-actions,
+  .session-head,
   .priority-strip,
   .usage-hero {
     flex-direction: column;

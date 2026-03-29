@@ -49,6 +49,13 @@ function formatTime(value) {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
+function formatShortPath(value) {
+  if (!value) {
+    return "-";
+  }
+  return value.replace("/Users/mac", "~");
+}
+
 function formatDurationMinutes(ms) {
   if (!Number.isFinite(ms)) {
     return "未知";
@@ -545,8 +552,8 @@ document.querySelector("#startLoginButton").addEventListener("click", async () =
     if (!ready) {
       return;
     }
-    await api("/api/login/start", { method: "POST" });
-    showToast("已打开 Terminal，请在终端里完成 codex login", "success");
+    const result = await api("/api/login/start", { method: "POST" });
+    showToast(result.message || "已打开 Terminal，请在终端里完成 codex login", "success");
   } catch (error) {
     showToast(error.message, "error");
   }
@@ -558,8 +565,8 @@ document.querySelector("#startDeviceLoginButton").addEventListener("click", asyn
     if (!ready) {
       return;
     }
-    await api("/api/login/start-device-auth", { method: "POST" });
-    showToast("已打开 Terminal，请按设备码流程登录", "success");
+    const result = await api("/api/login/start-device-auth", { method: "POST" });
+    showToast(result.message || "已打开 Terminal，请按设备码流程登录", "success");
   } catch (error) {
     showToast(error.message, "error");
   }

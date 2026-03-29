@@ -15,6 +15,7 @@ const CODEX_SWITCH = path.join(os.homedir(), ".local", "bin", "codex-switch");
 const PROFILES_DIR = path.join(os.homedir(), ".codex-profiles");
 const ACTIVE_CODEX_DIR = path.join(os.homedir(), ".codex");
 const SHARED_SESSIONS_DIR = path.join(PROFILES_DIR, ".shared-sessions");
+const SHARED_GLOBAL_STATE_PATH = path.join(PROFILES_DIR, ".shared-global-state.json");
 const PROCESS_POLL_ATTEMPTS = 12;
 const PROCESS_POLL_DELAY_MS = 500;
 const PROFILE_POLL_ATTEMPTS = 12;
@@ -22,6 +23,12 @@ const PROFILE_POLL_DELAY_MS = 250;
 const USAGE_CACHE_TTL_MS = 5 * 1000;
 const AUTO_SWITCH_POLL_MS = 15 * 1000;
 const AUTO_SWITCH_COOLDOWN_MS = 45 * 1000;
+const LOGIN_STAGING_PREFIX = "login-staging-";
+const LOCAL_SESSION_LIMIT = 30;
+const GLOBAL_STATE_FILE_NAME = ".codex-global-state.json";
+const IGNORED_WORKSPACE_ROOTS = new Set([
+  path.join(os.homedir(), "Documents", "Playground")
+]);
 const SHARED_SESSION_DIRS = ["sessions", "shell_snapshots"];
 const SHARED_SESSION_FILES = [
   "session_index.jsonl",
@@ -102,6 +109,24 @@ function isManagedProfileName(name) {
   return Boolean(name) && !["missing", "unknown", "unmanaged", "external-link"].includes(name);
 }
 
+function isLoginStagingProfile(name) {
+  return typeof name === "string" && name.startsWith(LOGIN_STAGING_PREFIX);
+}
+
+function createLoginStagingProfileName() {
+  const now = new Date();
+  const parts = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+    String(now.getHours()).padStart(2, "0"),
+    String(now.getMinutes()).padStart(2, "0"),
+    String(now.getSeconds()).padStart(2, "0"),
+    String(now.getMilliseconds()).padStart(3, "0")
+  ];
+  return `${LOGIN_STAGING_PREFIX}${parts.join("")}`;
+}
+
 function decodeBase64Url(input) {
   const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
   const padding = normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
@@ -177,6 +202,120 @@ async function writeJsonAtomic(filePath, data) {
   const tmpPath = `${filePath}.tmp-${process.pid}`;
   await fsp.writeFile(tmpPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
   await fsp.rename(tmpPath, filePath);
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    if (
+      typeof value !== "string" ||
+      !value.trim() ||
+      IGNORED_WORKSPACE_ROOTS.has(value) ||
+      seen.has(value)
+    ) {
+      continue;
+    }
+    seen.add(value);
+    result.push(value);
+  }
+  return result;
+}
+
+function mergeObjectMaps(baseValue, sourceValue) {
+  return {
+    ...(isPlainObject(baseValue) ? baseValue : {}),
+    ...(isPlainObject(sourceValue) ? sourceValue : {})
+  };
+}
+
+function filterObjectMapKeys(value) {
+  if (!isPlainObject(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).filter(([key]) => !IGNORED_WORKSPACE_ROOTS.has(key))
+  );
+}
+
+function mergeThreadTitles(baseValue, sourceValue) {
+  const baseTitles = isPlainObject(baseValue?.titles) ? baseValue.titles : {};
+  const sourceTitles = isPlainObject(sourceValue?.titles) ? sourceValue.titles : {};
+  const mergedTitles = {
+    ...baseTitles,
+    ...sourceTitles
+  };
+
+  return {
+    titles: mergedTitles,
+    order: uniqueStrings([
+      ...(Array.isArray(sourceValue?.order) ? sourceValue.order : []),
+      ...(Array.isArray(baseValue?.order) ? baseValue.order : []),
+      ...Object.keys(mergedTitles)
+    ])
+  };
+}
+
+function mergeOpenTargetPreferences(baseValue, sourceValue) {
+  return {
+    global:
+      sourceValue?.global ||
+      baseValue?.global ||
+      "vscode",
+    perPath: mergeObjectMaps(
+      filterObjectMapKeys(baseValue?.perPath),
+      filterObjectMapKeys(sourceValue?.perPath)
+    )
+  };
+}
+
+function mergeGlobalState(baseValue, sourceValue) {
+  const baseState = isPlainObject(baseValue) ? baseValue : {};
+  const sourceState = isPlainObject(sourceValue) ? sourceValue : {};
+
+  return {
+    ...baseState,
+    ...sourceState,
+    "electron-saved-workspace-roots": uniqueStrings([
+      ...(Array.isArray(sourceState["electron-saved-workspace-roots"]) ? sourceState["electron-saved-workspace-roots"] : []),
+      ...(Array.isArray(baseState["electron-saved-workspace-roots"]) ? baseState["electron-saved-workspace-roots"] : [])
+    ]),
+    "active-workspace-roots": uniqueStrings([
+      ...(Array.isArray(sourceState["active-workspace-roots"]) ? sourceState["active-workspace-roots"] : []),
+      ...(Array.isArray(baseState["active-workspace-roots"]) ? baseState["active-workspace-roots"] : [])
+    ]),
+    "project-order": uniqueStrings([
+      ...(Array.isArray(sourceState["project-order"]) ? sourceState["project-order"] : []),
+      ...(Array.isArray(baseState["project-order"]) ? baseState["project-order"] : []),
+      ...(Array.isArray(sourceState["electron-saved-workspace-roots"]) ? sourceState["electron-saved-workspace-roots"] : []),
+      ...(Array.isArray(baseState["electron-saved-workspace-roots"]) ? baseState["electron-saved-workspace-roots"] : [])
+    ]),
+    "electron-workspace-root-labels": mergeObjectMaps(
+      filterObjectMapKeys(baseState["electron-workspace-root-labels"]),
+      filterObjectMapKeys(sourceState["electron-workspace-root-labels"])
+    ),
+    "electron-persisted-atom-state": mergeObjectMaps(
+      baseState["electron-persisted-atom-state"],
+      sourceState["electron-persisted-atom-state"]
+    ),
+    "open-in-target-preferences": mergeOpenTargetPreferences(
+      baseState["open-in-target-preferences"],
+      sourceState["open-in-target-preferences"]
+    ),
+    "thread-titles": mergeThreadTitles(
+      baseState["thread-titles"],
+      sourceState["thread-titles"]
+    ),
+    "queued-follow-ups": mergeObjectMaps(
+      baseState["queued-follow-ups"],
+      sourceState["queued-follow-ups"]
+    )
+  };
 }
 
 async function readAutoSwitchConfig() {
@@ -584,6 +723,96 @@ async function readUsageForProfile(name, auth) {
   return value;
 }
 
+async function readSessionIndexEntries(limit = LOCAL_SESSION_LIMIT) {
+  const filePath = path.join(SHARED_SESSIONS_DIR, "session_index.jsonl");
+  if (!await pathExists(filePath)) {
+    return [];
+  }
+
+  const raw = await fsp.readFile(filePath, "utf8");
+  const entries = [];
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    try {
+      const entry = JSON.parse(trimmed);
+      if (!entry?.id) {
+        continue;
+      }
+      entries.push({
+        id: String(entry.id),
+        threadName: typeof entry.thread_name === "string" ? entry.thread_name.trim() : "",
+        updatedAt: entry.updated_at || null
+      });
+    } catch {}
+  }
+
+  entries.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  return entries.slice(0, limit);
+}
+
+async function readLocalSessions(limit = LOCAL_SESSION_LIMIT) {
+  const indexEntries = await readSessionIndexEntries(limit);
+  const indexById = new Map(indexEntries.map((entry) => [entry.id, entry]));
+  const dbPath = path.join(SHARED_SESSIONS_DIR, "state_5.sqlite");
+  let threadRows = [];
+
+  if (await pathExists(dbPath)) {
+    try {
+      const sql = [
+        "select id, updated_at, cwd, source, archived, rollout_path, model_provider, model",
+        "from threads",
+        "order by updated_at desc",
+        `limit ${Math.max(limit * 2, limit)};`
+      ].join(" ");
+      const { stdout } = await execFileAsync("sqlite3", ["-json", dbPath, sql]);
+      threadRows = stdout.trim() ? JSON.parse(stdout) : [];
+    } catch {
+      threadRows = [];
+    }
+  }
+
+  const merged = new Map();
+  for (const row of threadRows) {
+    const index = indexById.get(String(row.id));
+    const updatedAt = toIsoFromUnixSeconds(Number(row.updated_at)) || index?.updatedAt || null;
+    merged.set(String(row.id), {
+      id: String(row.id),
+      title: index?.threadName || `会话 ${row.id}`,
+      updatedAt,
+      cwd: row.cwd || "",
+      source: row.source || "",
+      archived: row.archived === 1,
+      rolloutPath: row.rollout_path || "",
+      modelProvider: row.model_provider || "",
+      model: row.model || ""
+    });
+  }
+
+  for (const entry of indexEntries) {
+    if (merged.has(entry.id)) {
+      continue;
+    }
+    merged.set(entry.id, {
+      id: entry.id,
+      title: entry.threadName || `会话 ${entry.id}`,
+      updatedAt: entry.updatedAt || null,
+      cwd: "",
+      source: "",
+      archived: false,
+      rolloutPath: "",
+      modelProvider: "",
+      model: ""
+    });
+  }
+
+  return [...merged.values()]
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+    .slice(0, limit);
+}
+
 async function pathExists(targetPath) {
   try {
     await fsp.lstat(targetPath);
@@ -678,6 +907,26 @@ async function copySqliteFamily(srcBasePath, destBasePath) {
   for (const suffix of suffixes) {
     await copyFileIfExists(`${srcBasePath}${suffix}`, `${destBasePath}${suffix}`);
   }
+}
+
+async function mergeGlobalStateFile(sharedPath, sourcePath) {
+  if (!await pathExists(sourcePath)) {
+    return;
+  }
+
+  const sharedRealPath = await readLinkRealPath(sharedPath);
+  const sourceRealPath = await readLinkRealPath(sourcePath);
+  if (sharedRealPath && sourceRealPath && sharedRealPath === sourceRealPath) {
+    return;
+  }
+
+  const [sharedState, sourceState] = await Promise.all([
+    readJsonIfExists(sharedPath),
+    readJsonIfExists(sourcePath)
+  ]);
+
+  const mergedState = mergeGlobalState(sharedState, sourceState);
+  await writeJsonAtomic(sharedPath, mergedState);
 }
 
 async function mergeSqliteDatabase(sharedBasePath, sourceBasePath, kind) {
@@ -792,6 +1041,22 @@ async function linkProfileItemToShared(profileDir, itemName) {
   await fsp.symlink(sharedItemPath, profileItemPath);
 }
 
+async function linkProfileGlobalStateToShared(profileDir) {
+  const profileStatePath = path.join(profileDir, GLOBAL_STATE_FILE_NAME);
+  const profileRealPath = await readLinkRealPath(profileStatePath);
+  const sharedRealPath = await readLinkRealPath(SHARED_GLOBAL_STATE_PATH);
+  if (profileRealPath && sharedRealPath && profileRealPath === sharedRealPath) {
+    return;
+  }
+
+  if (!await pathExists(SHARED_GLOBAL_STATE_PATH)) {
+    await writeJsonAtomic(SHARED_GLOBAL_STATE_PATH, {});
+  }
+
+  await fsp.rm(profileStatePath, { recursive: true, force: true });
+  await fsp.symlink(SHARED_GLOBAL_STATE_PATH, profileStatePath);
+}
+
 async function syncSessionArtifactsFromDir(sourceDir) {
   for (const { baseName, kind } of SQLITE_SESSION_DATABASES) {
     await mergeSqliteDatabase(path.join(SHARED_SESSIONS_DIR, baseName), path.join(sourceDir, baseName), kind);
@@ -805,6 +1070,13 @@ async function syncSessionArtifactsFromDir(sourceDir) {
   for (const dirName of SHARED_SESSION_DIRS) {
     await mergeDirectoryInto(path.join(SHARED_SESSIONS_DIR, dirName), path.join(sourceDir, dirName));
   }
+}
+
+async function syncGlobalStateFromDir(sourceDir) {
+  await mergeGlobalStateFile(
+    SHARED_GLOBAL_STATE_PATH,
+    path.join(sourceDir, GLOBAL_STATE_FILE_NAME)
+  );
 }
 
 async function ensureSharedSessionsLayout(targetProfileName) {
@@ -824,10 +1096,13 @@ async function ensureSharedSessionsLayout(targetProfileName) {
 
   if (["missing", "unknown", "unmanaged", "external-link"].includes(activeProfile) && await pathExists(ACTIVE_CODEX_DIR)) {
     await syncSessionArtifactsFromDir(ACTIVE_CODEX_DIR);
+    await syncGlobalStateFromDir(ACTIVE_CODEX_DIR);
   }
 
   for (const profileName of profileNames) {
-    await syncSessionArtifactsFromDir(getProfileDir(profileName));
+    const profileDir = getProfileDir(profileName);
+    await syncSessionArtifactsFromDir(profileDir);
+    await syncGlobalStateFromDir(profileDir);
   }
 
   for (const profileName of profilesToLink) {
@@ -838,6 +1113,7 @@ async function ensureSharedSessionsLayout(targetProfileName) {
     for (const itemName of SHARED_SESSION_ITEMS) {
       await linkProfileItemToShared(profileDir, itemName);
     }
+    await linkProfileGlobalStateToShared(profileDir);
   }
 }
 
@@ -854,6 +1130,29 @@ async function listProfileNames() {
       return [];
     }
     throw error;
+  }
+}
+
+async function cleanupOrphanLoginStagingProfiles(activeProfile) {
+  try {
+    const entries = await fsp.readdir(PROFILES_DIR, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !isLoginStagingProfile(entry.name) || entry.name === activeProfile) {
+        continue;
+      }
+
+      const auth = await readJsonIfExists(path.join(PROFILES_DIR, entry.name, "auth.json"));
+      const email = extractProfileMeta(auth).email;
+      if (email) {
+        continue;
+      }
+
+      await fsp.rm(path.join(PROFILES_DIR, entry.name), { recursive: true, force: true });
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
   }
 }
 
@@ -899,10 +1198,12 @@ async function readAuthForProfile(activeProfile, name) {
 
 async function getProfilesState() {
   const activeProfile = await readCurrentProfile();
+  await cleanupOrphanLoginStagingProfiles(activeProfile);
   const loginStatus = await readLoginStatus();
   const activeAccount = await readActiveProfileMeta(activeProfile);
   const activeAuth = await readAuthForProfile(activeProfile);
   const activeUsage = await readUsageForProfile(activeProfile, activeAuth);
+  const localSessions = await readLocalSessions();
   const profileNames = await listProfileNames();
 
   const profiles = await Promise.all(
@@ -937,6 +1238,7 @@ async function getProfilesState() {
     loginStatus,
     activeAccount,
     activeUsage,
+    localSessions,
     autoSwitch: getAutoSwitchPublicState(),
     profilesDir: PROFILES_DIR,
     activeCodexDir: ACTIVE_CODEX_DIR,
@@ -983,6 +1285,59 @@ async function deleteProfile(name) {
   return runCodexSwitch(["delete", name]);
 }
 
+async function prepareProfileForLogin() {
+  const activeProfile = await readCurrentProfile();
+  if (isLoginStagingProfile(activeProfile)) {
+    return {
+      ok: true,
+      changed: false,
+      activeProfile
+    };
+  }
+
+  const processes = await listCodexProcesses();
+  if (processes.length > 0) {
+    const closeResult = await closeCodexProcesses();
+    if (!closeResult.ok) {
+      return {
+        ok: false,
+        changed: false,
+        message: "Failed to close Codex-related processes before preparing login"
+      };
+    }
+  }
+
+  const stagingProfile = createLoginStagingProfileName();
+  const result = await runCodexSwitch(["new", stagingProfile]);
+  if (!result.ok) {
+    return {
+      ok: false,
+      changed: false,
+        message: sanitizePublicMessage(result)
+    };
+  }
+
+  const switchResult = await performProfileSwitch(stagingProfile, {
+    closeAndForce: true,
+    openCodex: false
+  });
+  if (!switchResult.ok) {
+    return {
+      ok: false,
+      changed: false,
+      message: switchResult.message || `Failed to activate staging profile ${stagingProfile}`
+    };
+  }
+
+  return {
+    ok: true,
+    changed: true,
+    activeProfile: stagingProfile,
+    previousProfile: activeProfile,
+    stagingProfile
+  };
+}
+
 async function autoRegisterActiveProfile() {
   const activeProfile = await readCurrentProfile();
   const activeAccount = await readActiveProfileMeta(activeProfile);
@@ -1013,8 +1368,11 @@ async function autoRegisterActiveProfile() {
     };
   }
 
-  if (activeProfile && !["missing", "unknown", "unmanaged", "external-link"].includes(activeProfile)) {
+  if (isLoginStagingProfile(activeProfile)) {
     const result = await renameProfile(activeProfile, email);
+    if (result.ok) {
+      await ensureSharedSessionsLayout(email);
+    }
     return {
       ok: result.ok,
       changed: result.ok,
@@ -1023,6 +1381,9 @@ async function autoRegisterActiveProfile() {
   }
 
   const result = await runCodexSwitch(["save", email]);
+  if (result.ok) {
+    await ensureSharedSessionsLayout(email);
+  }
   return {
     ok: result.ok,
     changed: result.ok,
@@ -1243,10 +1604,27 @@ async function performProfileSwitch(targetName, options = {}) {
   const closeAndForce = options.closeAndForce === true;
   const openCodex = options.openCodex === true;
 
+  let closeResult = null;
+  if (closeAndForce) {
+    const processes = await listCodexProcesses();
+    if (processes.length > 0) {
+      closeResult = await closeCodexProcesses();
+      if (!closeResult.ok) {
+        return {
+          ok: false,
+          message: "Failed to close Codex-related processes before switching profiles",
+          openedCodex: false,
+          activeProfile: await readCurrentProfile(),
+          forced: false,
+          closeResult
+        };
+      }
+    }
+  }
+
   await ensureSharedSessionsLayout(targetName);
   let result = await runCodexSwitch(["use", targetName]);
   let forced = false;
-  let closeResult = null;
   const firstMessage = sanitizePublicMessage(result);
   if (!result.ok && closeAndForce && /Codex appears to be running/i.test(firstMessage)) {
     closeResult = await closeCodexProcesses();
@@ -1401,6 +1779,9 @@ async function handleApi(req, res, pathname) {
       return;
     }
     const result = await runCodexSwitch(["save", body.name]);
+    if (result.ok) {
+      await ensureSharedSessionsLayout(body.name);
+    }
     sendJson(res, result.ok ? 200 : 400, {
       ok: result.ok,
       message: sanitizePublicMessage(result)
@@ -1415,6 +1796,9 @@ async function handleApi(req, res, pathname) {
       return;
     }
     const result = await runCodexSwitch(["new", body.name]);
+    if (result.ok) {
+      await ensureSharedSessionsLayout(body.name);
+    }
     sendJson(res, result.ok ? 200 : 400, {
       ok: result.ok,
       message: sanitizePublicMessage(result)
@@ -1511,6 +1895,9 @@ async function handleApi(req, res, pathname) {
       return;
     }
     const result = await renameProfile(body.oldName, body.newName);
+    if (result.ok) {
+      await ensureSharedSessionsLayout(body.newName);
+    }
     sendJson(res, result.ok ? 200 : 400, {
       ok: result.ok,
       message: sanitizePublicMessage(result)
@@ -1545,19 +1932,45 @@ async function handleApi(req, res, pathname) {
   }
 
   if (req.method === "POST" && pathname === "/api/login/start") {
+    const prepared = await prepareProfileForLogin();
+    if (!prepared.ok) {
+      sendJson(res, 400, {
+        ok: false,
+        message: prepared.message || "Failed to prepare a staging profile for login"
+      });
+      return;
+    }
+
     const result = await openTerminalCommand("codex login");
     sendJson(res, result.ok ? 200 : 500, {
       ok: result.ok,
-      message: result.ok ? "Opened Terminal for codex login" : result.message
+      message: result.ok
+        ? (prepared.changed
+            ? `已切到临时登录 profile ${prepared.stagingProfile}，请在终端里完成 codex login`
+            : "已打开 Terminal，请在终端里完成 codex login")
+        : result.message
     });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/login/start-device-auth") {
+    const prepared = await prepareProfileForLogin();
+    if (!prepared.ok) {
+      sendJson(res, 400, {
+        ok: false,
+        message: prepared.message || "Failed to prepare a staging profile for device auth"
+      });
+      return;
+    }
+
     const result = await openTerminalCommand("codex login --device-auth");
     sendJson(res, result.ok ? 200 : 500, {
       ok: result.ok,
-      message: result.ok ? "Opened Terminal for codex device login" : result.message
+      message: result.ok
+        ? (prepared.changed
+            ? `已切到临时登录 profile ${prepared.stagingProfile}，请按设备码流程登录`
+            : "已打开 Terminal，请按设备码流程登录")
+        : result.message
     });
     return;
   }

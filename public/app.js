@@ -39,6 +39,15 @@ function formatTime(value) {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
+function formatLoginStatus(value) {
+  if (!value) return "-";
+  const text = String(value).trim();
+  if (/^Logged in using ChatGPT$/i.test(text)) return "ChatGPT 登录";
+  if (/^Logged in using API key$/i.test(text)) return "API Key 登录";
+  if (/logged out/i.test(text)) return "未登录";
+  return text;
+}
+
 function formatShortPath(value) {
   if (!value) return "-";
   return value.replace("/Users/mac", "~");
@@ -424,12 +433,16 @@ async function ensureCodexReady(actionLabel) {
 async function loadState() {
   const state = await api("/api/state");
   activeProfileEl.textContent = state.activeProfile;
+  activeProfileEl.title = state.activeProfile || "";
   profilesDirEl.textContent = formatShortPath(state.profilesDir);
-  loginStatusEl.textContent = state.loginStatus || "-";
+  loginStatusEl.textContent = formatLoginStatus(state.loginStatus);
+  loginStatusEl.title = state.loginStatus || "";
   activeAccountEmailEl.textContent = state.activeAccount?.email || "未检测到";
+  activeAccountEmailEl.title = state.activeAccount?.email || "";
 
   const activeUsageSummary = getUsageSummary(state.activeUsage);
   activeUsageTitleEl.textContent = activeUsageSummary.title;
+  activeUsageTitleEl.title = `${activeUsageSummary.title} · ${activeUsageSummary.meta}`;
   activeUsageMeterBarEl.style.width = `${activeUsageSummary.percent}%`;
   activeUsageMeterBarEl.dataset.tone = activeUsageSummary.tone;
 
@@ -466,6 +479,15 @@ async function loadAndMaybeAutoRegister({ silent = false, allowAutoRegister = tr
   const state = await loadState();
   if (allowAutoRegister) await maybeAutoRegister(state, { silent });
 }
+
+document.querySelector("#openCodexButton").addEventListener("click", async () => {
+  try {
+    const result = await api("/api/open/codex", { method: "POST" });
+    showToast(result.ok ? "已打开 Codex" : "打开 Codex 失败", result.ok ? "success" : "error");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+});
 
 document.querySelector("#startLoginButton").addEventListener("click", async () => {
   try {

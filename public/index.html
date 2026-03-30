@@ -10,24 +10,27 @@
     <main class="shell">
       <header class="topbar">
         <div class="topbar-left">
-          <h1 class="topbar-title">Codex 账号切换台</h1>
-          <span class="topbar-badge">Local Control Console</span>
+          <div class="topbar-heading">
+            <h1 class="topbar-title">Codex 账号切换台</h1>
+            <span class="topbar-badge">Local Control Console</span>
+          </div>
+          <p class="topbar-note">本地多账号登录、额度监控与切换控制</p>
         </div>
         <div class="topbar-right">
           <div class="topbar-stat">
-            <span class="topbar-stat-label">Profile</span>
+            <span class="topbar-stat-label">当前 Profile</span>
             <strong id="activeProfile">加载中</strong>
           </div>
           <div class="topbar-stat">
-            <span class="topbar-stat-label">状态</span>
+            <span class="topbar-stat-label">登录状态</span>
             <strong id="loginStatus">加载中</strong>
           </div>
           <div class="topbar-stat">
-            <span class="topbar-stat-label">账号</span>
+            <span class="topbar-stat-label">当前账号</span>
             <strong id="activeAccountEmail">加载中</strong>
           </div>
           <div class="topbar-stat topbar-stat-usage">
-            <span class="topbar-stat-label">额度</span>
+            <span class="topbar-stat-label">剩余额度</span>
             <strong id="activeUsageTitle">加载中</strong>
             <div class="topbar-meter">
               <div id="activeUsageMeterBar" class="topbar-meter-bar"></div>
@@ -38,6 +41,10 @@
 
       <section class="toolbar">
         <div class="toolbar-group">
+          <button id="openCodexButton" class="btn btn-secondary" type="button">
+            <svg class="btn-icon" viewBox="0 0 16 16" fill="none"><path d="M3 4.5A1.5 1.5 0 0 1 4.5 3h7A1.5 1.5 0 0 1 13 4.5v7a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 11.5z" stroke="currentColor" stroke-width="1.3"/><path d="M6 8h4M8 6v4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+            打开 Codex
+          </button>
           <button id="startLoginButton" class="btn btn-primary" type="button">
             <svg class="btn-icon" viewBox="0 0 16 16" fill="none"><path d="M8 1v10m0 0L4.5 7.5M8 11l3.5-3.5M2 14h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
             CLI 登录

@@ -76,10 +76,9 @@ body {
   position: sticky;
   top: 12px;
   z-index: 20;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 18px;
   padding: 18px 22px;
   border-radius: var(--radius-xl);
   background: linear-gradient(145deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.92) 46%, rgba(37, 99, 235, 0.86) 100%);
@@ -91,9 +90,17 @@ body {
 
 .topbar-left {
   display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.topbar-heading {
+  display: flex;
   align-items: center;
   gap: 12px;
-  flex-shrink: 0;
+  flex-wrap: wrap;
 }
 
 .topbar-title {
@@ -102,6 +109,14 @@ body {
   font-weight: 800;
   letter-spacing: -0.03em;
   white-space: nowrap;
+}
+
+.topbar-note {
+  margin: 0;
+  max-width: 28ch;
+  font-size: 13px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.72);
 }
 
 .topbar-badge {
@@ -118,21 +133,22 @@ body {
 }
 
 .topbar-right {
-  display: flex;
-  align-items: stretch;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
-  overflow: hidden;
+  min-width: 0;
 }
 
 .topbar-stat {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
-  padding: 8px 10px;
-  border-radius: 11px;
-  background: rgba(255, 255, 255, 0.09);
+  min-height: 68px;
+  padding: 11px 13px;
+  border-radius: 13px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.11) 0%, rgba(255, 255, 255, 0.08) 100%);
   border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
@@ -145,15 +161,17 @@ body {
 }
 
 .topbar-stat strong {
+  display: block;
   font-size: 13px;
   font-weight: 700;
-  white-space: nowrap;
+  line-height: 1.3;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .topbar-stat-usage {
-  min-width: 154px;
+  background: linear-gradient(180deg, rgba(111, 168, 255, 0.18) 0%, rgba(87, 140, 255, 0.13) 100%);
 }
 
 .topbar-meter {
@@ -184,7 +202,7 @@ body {
 
 .toolbar {
   position: sticky;
-  top: 112px;
+  top: 148px;
   z-index: 12;
   display: flex;
   align-items: center;
@@ -932,20 +950,18 @@ dd {
   .topbar {
     position: relative;
     top: 0;
-    flex-direction: column;
-    align-items: stretch;
+    grid-template-columns: 1fr;
     gap: 10px;
     padding: 15px;
   }
 
   .topbar-right {
-    flex-wrap: wrap;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
   }
 
   .topbar-stat {
-    flex: 1;
-    min-width: 90px;
+    min-height: 62px;
   }
 
   .toolbar {
@@ -997,6 +1013,14 @@ dd {
 @media (max-width: 480px) {
   .topbar-title {
     font-size: 18px;
+  }
+
+  .topbar-right {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar-note {
+    max-width: none;
   }
 
   .strip-bar {

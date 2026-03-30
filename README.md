@@ -40,6 +40,36 @@
 3. 将 `Codex Switch.app` 拖到 `Applications`
 4. 从“应用程序”中打开 `Codex Switch`
 
+### 命令行安装
+
+如果你更习惯用命令行，可以直接执行下面这组命令：
+
+```bash
+VERSION="0.1.1"
+APP_NAME="Codex Switch"
+DMG_NAME="Codex-Switch-${VERSION}-arm64.dmg"
+DOWNLOAD_DIR="$HOME/Downloads/Codex-Switch"
+DMG_PATH="$DOWNLOAD_DIR/$DMG_NAME"
+VOLUME_PATH="/Volumes/${APP_NAME} ${VERSION}-arm64"
+
+mkdir -p "$DOWNLOAD_DIR"
+
+curl -L --fail -o "$DMG_PATH" \
+  "https://github.com/Lsogod/codex-switch-web/releases/download/v${VERSION}/${DMG_NAME}"
+
+hdiutil attach -nobrowse -readonly "$DMG_PATH"
+rm -rf "/Applications/${APP_NAME}.app"
+ditto "${VOLUME_PATH}/${APP_NAME}.app" "/Applications/${APP_NAME}.app"
+hdiutil detach "$VOLUME_PATH"
+
+open -na "/Applications/${APP_NAME}.app"
+```
+
+说明：
+
+- 如果更新了版本，只需要把 `VERSION` 改成对应版本号
+- 这组命令会用新版本覆盖 `/Applications/Codex Switch.app`
+
 ## 首次打开
 
 这个 App 目前还没有 Apple Developer 签名和 notarization，所以第一次打开时，macOS 可能会拦截。

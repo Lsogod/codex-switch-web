@@ -859,6 +859,162 @@ async function readSessionIndexEntries(limit = LOCAL_SESSION_LIMIT) {
   return entries.slice(0, limit);
 }
 
+function buildSessionIndexEntryFromThreadRow(row) {
+  const id = row?.id ? String(row.id) : "";
+  if (!id) {
+    return null;
+  }
+
+  const threadName =
+    (typeof row.thread_name === "string" && row.thread_name.trim()) ||
+    (typeof row.title === "string" && row.title.trim()) ||
+    (typeof row.first_user_message === "string" && row.first_user_message.trim()) ||
+    `会话 ${id}`;
+
+  return {
+    id,
+    thread_name: threadName,
+    updated_at: toIsoFromUnixSeconds(Number(row.updated_at)) || null
+  };
+}
+
+async function readSessionIndexMap(filePath) {
+  const merged = new Map();
+  if (!await pathExists(filePath)) {
+    return merged;
+  }
+
+  const raw = await fsp.readFile(filePath, "utf8");
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    try {
+      const entry = JSON.parse(trimmed);
+      if (!entry?.id) {
+        continue;
+      }
+      const normalized = {
+        id: String(entry.id),
+        thread_name: typeof entry.thread_name === "string" ? entry.thread_name : "",
+        updated_at: entry.updated_at || null
+      };
+      const previous = merged.get(normalized.id);
+      if (!previous || String(normalized.updated_at || "") >= String(previous.updated_at || "")) {
+        merged.set(normalized.id, normalized);
+      }
+    } catch {}
+  }
+
+  return merged;
+}
+
+async function writeSessionIndexMap(filePath, rowsMap) {
+  const rows = [...rowsMap.values()].sort((a, b) => {
+    const dateOrder = String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
+    if (dateOrder !== 0) {
+      return dateOrder;
+    }
+    return String(a.id).localeCompare(String(b.id));
+  });
+
+  await ensureParentDir(filePath);
+  const tmpPath = `${filePath}.tmp-${process.pid}`;
+  const content = rows.length ? `${rows.map((row) => JSON.stringify(row)).join("\n")}\n` : "";
+  await fsp.writeFile(tmpPath, content, "utf8");
+  await fsp.rename(tmpPath, filePath);
+}
+
+async function backfillSessionIndexFromStateDb(sessionIndexPath, dbPath) {
+  if (!await pathExists(dbPath)) {
+    return 0;
+  }
+
+  const rowsMap = await readSessionIndexMap(sessionIndexPath);
+  let threadRows = [];
+
+  try {
+    const sql = [
+      "select id, title, first_user_message, updated_at",
+      "from threads"
+    ].join(" ");
+    const { stdout } = await execFileAsync("sqlite3", ["-json", dbPath, sql]);
+    threadRows = stdout.trim() ? JSON.parse(stdout) : [];
+  } catch {
+    return 0;
+  }
+
+  let added = 0;
+  for (const row of threadRows) {
+    const entry = buildSessionIndexEntryFromThreadRow(row);
+    if (!entry || rowsMap.has(entry.id)) {
+      continue;
+    }
+    rowsMap.set(entry.id, entry);
+    added += 1;
+  }
+
+  if (added > 0) {
+    await writeSessionIndexMap(sessionIndexPath, rowsMap);
+  }
+
+  return added;
+}
+
+async function backfillThreadTitlesInGlobalState(globalStatePath, sessionIndexPath) {
+  const indexMap = await readSessionIndexMap(sessionIndexPath);
+  if (indexMap.size === 0) {
+    return 0;
+  }
+
+  const state = await readJsonIfExists(globalStatePath);
+  const baseState = isPlainObject(state) ? { ...state } : {};
+  const currentThreadTitles = isPlainObject(baseState["thread-titles"]) ? baseState["thread-titles"] : {};
+  const currentTitles = isPlainObject(currentThreadTitles.titles) ? { ...currentThreadTitles.titles } : {};
+  const currentOrder = Array.isArray(currentThreadTitles.order) ? currentThreadTitles.order : [];
+
+  let added = 0;
+  for (const entry of indexMap.values()) {
+    if (!entry.thread_name || currentTitles[entry.id]) {
+      continue;
+    }
+    currentTitles[entry.id] = entry.thread_name;
+    added += 1;
+  }
+
+  const sortedIds = [...indexMap.values()]
+    .sort((a, b) => {
+      const dateOrder = String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
+      if (dateOrder !== 0) {
+        return dateOrder;
+      }
+      return String(a.id).localeCompare(String(b.id));
+    })
+    .map((entry) => entry.id);
+
+  const nextThreadTitles = {
+    titles: currentTitles,
+    order: uniqueStrings([
+      ...sortedIds,
+      ...currentOrder,
+      ...Object.keys(currentTitles)
+    ])
+  };
+
+  const changed =
+    JSON.stringify(currentThreadTitles.titles || {}) !== JSON.stringify(nextThreadTitles.titles) ||
+    JSON.stringify(currentThreadTitles.order || []) !== JSON.stringify(nextThreadTitles.order);
+
+  if (!changed) {
+    return 0;
+  }
+
+  baseState["thread-titles"] = nextThreadTitles;
+  await writeJsonAtomic(globalStatePath, baseState);
+  return added;
+}
+
 async function readLocalSessions(limit = LOCAL_SESSION_LIMIT) {
   const indexEntries = await readSessionIndexEntries(limit);
   const indexById = new Map(indexEntries.map((entry) => [entry.id, entry]));
@@ -1069,41 +1225,16 @@ async function mergeSessionIndex(sharedPath, sourcePath) {
 
   const merged = new Map();
   for (const filePath of [sharedPath, sourcePath]) {
-    if (!await pathExists(filePath)) {
-      continue;
-    }
-    const raw = await fsp.readFile(filePath, "utf8");
-    for (const line of raw.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        continue;
+    const rowsMap = await readSessionIndexMap(filePath);
+    for (const [id, entry] of rowsMap.entries()) {
+      const previous = merged.get(id);
+      if (!previous || String(entry.updated_at || "") >= String(previous.updated_at || "")) {
+        merged.set(id, entry);
       }
-      try {
-        const entry = JSON.parse(trimmed);
-        if (!entry?.id) {
-          continue;
-        }
-        const previous = merged.get(entry.id);
-        if (!previous || String(entry.updated_at || "") >= String(previous.updated_at || "")) {
-          merged.set(entry.id, entry);
-        }
-      } catch {}
     }
   }
 
-  const rows = [...merged.values()].sort((a, b) => {
-    const dateOrder = String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
-    if (dateOrder !== 0) {
-      return dateOrder;
-    }
-    return String(a.id).localeCompare(String(b.id));
-  });
-
-  await ensureParentDir(sharedPath);
-  const tmpPath = `${sharedPath}.tmp-${process.pid}`;
-  const content = rows.length ? `${rows.map((row) => JSON.stringify(row)).join("\n")}\n` : "";
-  await fsp.writeFile(tmpPath, content, "utf8");
-  await fsp.rename(tmpPath, sharedPath);
+  await writeSessionIndexMap(sharedPath, merged);
 }
 
 async function mergeDirectoryInto(sharedDirPath, sourceDirPath) {
@@ -1176,12 +1307,22 @@ async function syncSessionArtifactsFromDir(sourceDir) {
   for (const dirName of SHARED_SESSION_DIRS) {
     await mergeDirectoryInto(path.join(SHARED_SESSIONS_DIR, dirName), path.join(sourceDir, dirName));
   }
+
+  await backfillSessionIndexFromStateDb(
+    path.join(SHARED_SESSIONS_DIR, "session_index.jsonl"),
+    path.join(SHARED_SESSIONS_DIR, "state_5.sqlite")
+  );
 }
 
 async function syncGlobalStateFromDir(sourceDir) {
   await mergeGlobalStateFile(
     SHARED_GLOBAL_STATE_PATH,
     path.join(sourceDir, GLOBAL_STATE_FILE_NAME)
+  );
+
+  await backfillThreadTitlesInGlobalState(
+    SHARED_GLOBAL_STATE_PATH,
+    path.join(SHARED_SESSIONS_DIR, "session_index.jsonl")
   );
 }
 

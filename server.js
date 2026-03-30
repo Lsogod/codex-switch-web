@@ -21,6 +21,7 @@ const PROCESS_POLL_DELAY_MS = 500;
 const PROFILE_POLL_ATTEMPTS = 12;
 const PROFILE_POLL_DELAY_MS = 250;
 const USAGE_CACHE_TTL_MS = 5 * 1000;
+const USAGE_FETCH_TIMEOUT_MS = 3 * 1000;
 const AUTO_SWITCH_POLL_MS = 15 * 1000;
 const AUTO_SWITCH_COOLDOWN_MS = 45 * 1000;
 const LOGIN_STAGING_PREFIX = "login-staging-";
@@ -46,6 +47,10 @@ const SQLITE_SESSION_DATABASES = [
 const SHARED_SESSION_ITEMS = [...SHARED_SESSION_DIRS, ...SHARED_SESSION_FILES];
 const AUTO_SWITCH_STATE_FILE = path.join(PROFILES_DIR, ".auto-switch.json");
 const usageCache = new Map();
+const proxyEnvCache = {
+  expiresAt: 0,
+  value: null
+};
 const autoSwitchRuntime = {
   enabled: false,
   inFlight: false,
@@ -651,24 +656,117 @@ function isUsageExhausted(usage) {
   return usage.data.blocked === true || remainingPercent === 0;
 }
 
-async function fetchJson(url, options = {}) {
-  const response = await fetch(url, options);
-  const text = await response.text();
-  let data = null;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = text || null;
+function readProxyField(raw, key) {
+  const match = String(raw || "").match(new RegExp(`\\b${key}\\s*:\\s*(.+)`));
+  return match ? match[1].trim() : "";
+}
+
+async function readProxyEnv() {
+  if (process.env.http_proxy || process.env.HTTP_PROXY || process.env.https_proxy || process.env.HTTPS_PROXY) {
+    return {
+      http_proxy: process.env.http_proxy || process.env.HTTP_PROXY || "",
+      https_proxy: process.env.https_proxy || process.env.HTTPS_PROXY || "",
+      all_proxy: process.env.all_proxy || process.env.ALL_PROXY || ""
+    };
   }
 
-  if (!response.ok) {
+  const now = Date.now();
+  if (proxyEnvCache.value && proxyEnvCache.expiresAt > now) {
+    return proxyEnvCache.value;
+  }
+
+  const value = {
+    http_proxy: "",
+    https_proxy: "",
+    all_proxy: ""
+  };
+
+  try {
+    const { stdout } = await execFileAsync("scutil", ["--proxy"]);
+    const httpEnable = readProxyField(stdout, "HTTPEnable");
+    const httpsEnable = readProxyField(stdout, "HTTPSEnable");
+    const socksEnable = readProxyField(stdout, "SOCKSEnable");
+    if (httpEnable === "1") {
+      const host = readProxyField(stdout, "HTTPProxy");
+      const port = readProxyField(stdout, "HTTPPort");
+      if (host && port) {
+        value.http_proxy = `http://${host}:${port}`;
+      }
+    }
+    if (httpsEnable === "1") {
+      const host = readProxyField(stdout, "HTTPSProxy");
+      const port = readProxyField(stdout, "HTTPSPort");
+      if (host && port) {
+        value.https_proxy = `http://${host}:${port}`;
+      }
+    }
+    if (socksEnable === "1") {
+      const host = readProxyField(stdout, "SOCKSProxy");
+      const port = readProxyField(stdout, "SOCKSPort");
+      if (host && port) {
+        value.all_proxy = `socks5://${host}:${port}`;
+      }
+    }
+  } catch {}
+
+  proxyEnvCache.value = value;
+  proxyEnvCache.expiresAt = now + 60 * 1000;
+  return value;
+}
+
+async function curlJson(url, { headers = {}, timeoutMs = null } = {}) {
+  const args = ["-sS", "--request", "GET"];
+  if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+    const seconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+    args.push("--connect-timeout", String(seconds), "--max-time", String(seconds));
+  }
+
+  for (const [name, value] of Object.entries(headers)) {
+    args.push("-H", `${name}: ${value}`);
+  }
+
+  args.push("-w", "\n%{http_code}", url);
+  const proxyEnv = await readProxyEnv();
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync("curl", args, {
+      maxBuffer: 1024 * 1024 * 8,
+      env: {
+        ...process.env,
+        ...proxyEnv
+      }
+    }));
+  } catch (error) {
+    const stderr = String(error.stderr || "").trim();
+    const sanitized = new Error(
+      stderr.includes("Couldn't connect to server")
+        ? "Usage endpoint unreachable from current network."
+        : stderr || "Usage request failed."
+    );
+    sanitized.status = null;
+    throw sanitized;
+  }
+
+  const lines = String(stdout || "").split("\n");
+  const statusLine = lines.pop() || "";
+  const status = Number.parseInt(statusLine.trim(), 10);
+  const bodyText = lines.join("\n").trim();
+
+  let data = null;
+  try {
+    data = bodyText ? JSON.parse(bodyText) : null;
+  } catch {
+    data = bodyText || null;
+  }
+
+  if (!Number.isFinite(status) || status < 200 || status >= 300) {
     const message =
       typeof data === "object" && data && "detail" in data ? String(data.detail) :
       typeof data === "object" && data && "error" in data ? String(data.error) :
-      typeof data === "string" ? data :
-      `HTTP ${response.status}`;
+      typeof data === "string" && data ? data :
+      Number.isFinite(status) ? `HTTP ${status}` : "Request failed";
     const error = new Error(message);
-    error.status = response.status;
+    error.status = Number.isFinite(status) ? status : null;
     error.responseBody = data;
     throw error;
   }
@@ -687,7 +785,8 @@ async function readUsageForAuth(auth) {
     return null;
   }
 
-  return fetchJson("https://chatgpt.com/backend-api/wham/usage", {
+  return curlJson("https://chatgpt.com/backend-api/wham/usage", {
+    timeoutMs: USAGE_FETCH_TIMEOUT_MS,
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "ChatGPT-Account-Id": accountId,
@@ -712,7 +811,10 @@ async function readUsageForProfile(name, auth) {
   } catch (error) {
     value = {
       ok: false,
-      error: error.status === 401 || error.status === 403 ? "Usage unavailable. Re-login may be required." : error.message
+      error:
+        error.status === 401 || error.status === 403
+            ? "Usage unavailable. Re-login may be required."
+            : error.message
     };
   }
 

@@ -2019,6 +2019,15 @@ async function initializeAutoSwitch() {
 }
 
 async function handleApi(req, res, pathname) {
+  if (req.method === "GET" && pathname === "/api/health") {
+    sendJson(res, 200, {
+      ok: true,
+      host: HOST,
+      port: PORT
+    });
+    return;
+  }
+
   if (req.method === "GET" && pathname === "/api/state") {
     const state = await getProfilesState();
     sendJson(res, 200, state);

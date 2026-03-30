@@ -9,6 +9,7 @@ pnpm-debug.log*
 *.log
 *.pid
 *.tmp
+dist/
 
 # Editor / OS
 .vscode/

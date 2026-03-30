@@ -1,11 +1,14 @@
-# Codex Switch Web
+# Codex Switch
 
-本地运行的 Codex 账号切换控制台。
+本地运行的 Codex 多账号切换控制台，支持 Web 控制台和 Electron 菜单栏 App。
 
 它管理当前机器上的 `~/.codex` 和 `~/.codex-profiles`，提供账号切换、额度查看、优先级排序，以及额度用尽后的自动切号。
 
 ## 功能
 
+- 支持作为 Electron 菜单栏 App 运行，不再依赖手动打开浏览器
+- 菜单栏 App 默认常驻顶部状态栏，可选显示悬浮额度球
+- 需要完整界面时，可以从状态栏菜单手动打开完整控制台窗口
 - 查看当前激活的 profile、当前账号、登录状态、当前额度和受管目录
 - 列出本地已保存的 profiles，并显示安全元信息
 - 账号列表使用紧凑条目卡展示，可展开查看详细信息
@@ -59,12 +62,17 @@
 
 ## 快速开始
 
-从克隆仓库到登录第一个账号，最短流程如下：
+从克隆仓库到启动第一个界面，最短流程如下：
 
 ```bash
 git clone git@github.com:Lsogod/codex-switch-web.git
 cd codex-switch-web
 npm install
+```
+
+启动 Web 版：
+
+```bash
 npm start
 ```
 
@@ -72,6 +80,12 @@ npm start
 
 ```text
 http://127.0.0.1:4312
+```
+
+或者直接启动菜单栏 App：
+
+```bash
+npm run app
 ```
 
 然后在页面里：
@@ -98,6 +112,74 @@ http://127.0.0.1:4312
 ```
 
 这个项目没有前端构建步骤，直接由 `server.js` 提供静态页面和 API。
+
+### 菜单栏 App 运行
+
+如果你不想通过浏览器使用，也可以直接运行：
+
+```bash
+npm run app
+```
+
+菜单栏 App 的行为：
+
+- 优先复用已经在 `127.0.0.1:4312` 运行的本地服务
+- 如果本地服务没启动，App 会自动拉起 `server.js`
+- 默认不显示 Dock 主窗口，而是驻留在 macOS 菜单栏
+- 左键或右键点击图标都会弹出菜单
+- 状态栏菜单里可以直接启动 Codex、切换账号、打开控制台窗口、切换悬浮额度和开机自启
+- 悬浮额度球默认只显示当前账号的剩余额度和重置时间，右键会弹出同一套菜单
+- 更适合常驻使用，而不是长期占一个完整浏览器标签页
+
+当前这套菜单栏 App 是 Electron 壳，核心逻辑仍然是本地 `server.js + public/`。
+
+## GitHub 分发
+
+如果你想把它放到 GitHub 让别人下载，目前项目已经提供了 macOS 构建链路：
+
+```bash
+npm run app:dmg
+```
+
+或一次生成 `dmg + zip`：
+
+```bash
+npm run app:dist
+```
+
+默认产物会输出到：
+
+```text
+dist/
+```
+
+仓库里还带了一个 GitHub Actions 工作流：
+
+- [`.github/workflows/release-macos.yml`](./.github/workflows/release-macos.yml)
+
+它支持两种方式：
+
+- 手动触发 `workflow_dispatch`
+- 推送 tag，例如 `v0.1.0`
+
+工作流会在 `macos-14` 上构建 `dmg` 和 `zip`，并在 tag 触发时自动上传到 GitHub Releases。
+
+非常重要的边界：
+
+- 现在这套产物可以生成并上传 GitHub
+- 但它还没有 `Developer ID` 签名，也没有 notarization
+- 所以别人从 GitHub 下载后，macOS 很可能会提示来源不明或被 Gatekeeper 拦截
+
+也就是说：
+
+- 适合“技术用户自己下载后手动放行”
+- 不适合当成完全无阻力的公开安装包
+
+如果要做到真正的“下载后直接双击安装”，还需要继续接入：
+
+- Apple Developer 证书签名
+- Apple notarization
+- 最好再补一个稳定的 Release 发布流程和签名密钥配置
 
 ## 权限与系统提示
 
@@ -152,7 +234,10 @@ http://127.0.0.1:4312
 
 ### 3. 手动切换账号
 
-在账号列表中点击 `切换到此账号`。
+可以通过两种方式切换：
+
+- Web 控制台里的 `切换`
+- 状态栏菜单里的 `账号列表`
 
 切换时服务会：
 
@@ -216,6 +301,7 @@ launchctl print gui/$(id -u)/com.example.codex-switch-web
 
 主要 API：
 
+- `GET /api/health`
 - `GET /api/state`
 - `POST /api/profile/use`
 - `POST /api/profile/delete`
@@ -243,6 +329,7 @@ launchctl print gui/$(id -u)/com.example.codex-switch-web
 - 额度读取依赖产品内部接口，不是公开稳定 API
 - 如果 OpenAI 修改了接口路径或返回字段，需要同步调整代码
 - 自动切号会主动关闭占用 `~/.codex` 的 Codex 相关进程，以确保切换真正生效
+- Electron 菜单栏 App 当前是本地运行壳，还不是打包后的独立分发版
 
 ## License
 

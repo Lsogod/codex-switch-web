@@ -2,8 +2,52 @@
   "name": "codex-switch-web",
   "version": "0.1.0",
   "private": true,
-  "description": "Local web UI for manual Codex profile switching",
+  "author": "Lsogod",
+  "description": "Local Codex multi-account switcher with web and menu bar shells",
+  "main": "electron/main.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "web": "node server.js",
+    "app": "electron .",
+    "app:dir": "electron-builder --mac dir",
+    "app:dmg": "electron-builder --mac dmg",
+    "app:dist": "electron-builder --mac dmg zip"
+  },
+  "devDependencies": {
+    "electron": "^41.1.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.lsogod.codexswitch",
+    "productName": "Codex Switch",
+    "asar": false,
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "server.js",
+      "public/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "artifactName": "Codex-Switch-${version}-${arch}.${ext}",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    }
   }
 }

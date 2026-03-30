@@ -1,6 +1,6 @@
 {
   "name": "codex-switch-web",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "author": "Lsogod",
   "description": "Local Codex multi-account switcher with web and menu bar shells",
@@ -9,9 +9,9 @@
     "start": "node server.js",
     "web": "node server.js",
     "app": "electron .",
-    "app:dir": "electron-builder --mac dir",
-    "app:dmg": "electron-builder --mac dmg",
-    "app:dist": "electron-builder --mac dmg zip"
+    "app:dir": "electron-builder --publish never --mac dir",
+    "app:dmg": "electron-builder --publish never --mac dmg",
+    "app:dist": "electron-builder --publish never --mac dmg zip"
   },
   "devDependencies": {
     "electron": "^41.1.0",

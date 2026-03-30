@@ -11,7 +11,8 @@ const HOST = "127.0.0.1";
 const PORT = process.env.PORT || 4312;
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
-const CODEX_SWITCH = path.join(os.homedir(), ".local", "bin", "codex-switch");
+const BUNDLED_CODEX_SWITCH = path.join(ROOT, "bin", "codex-switch");
+const LOCAL_CODEX_SWITCH = path.join(os.homedir(), ".local", "bin", "codex-switch");
 const PROFILES_DIR = path.join(os.homedir(), ".codex-profiles");
 const ACTIVE_CODEX_DIR = path.join(os.homedir(), ".codex");
 const SHARED_SESSIONS_DIR = path.join(PROFILES_DIR, ".shared-sessions");
@@ -60,6 +61,36 @@ const autoSwitchRuntime = {
   lastDecision: null,
   lastError: null
 };
+
+function isExecutableFile(filePath) {
+  try {
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getCodexSwitchCommand() {
+  const overridePath = process.env.CODEX_SWITCH_PATH;
+  if (overridePath && isExecutableFile(overridePath)) {
+    return overridePath;
+  }
+
+  if (isExecutableFile(BUNDLED_CODEX_SWITCH)) {
+    return BUNDLED_CODEX_SWITCH;
+  }
+
+  if (isExecutableFile(LOCAL_CODEX_SWITCH)) {
+    return LOCAL_CODEX_SWITCH;
+  }
+
+  return "codex-switch";
+}
+
+function getCodexSwitchInstallHint() {
+  return "codex-switch is required. DMG builds should use the bundled copy; source runs can install bin/codex-switch to ~/.local/bin or add codex-switch to PATH.";
+}
 
 function sendJson(res, statusCode, data) {
   res.writeHead(statusCode, {
@@ -1405,7 +1436,7 @@ async function cleanupOrphanLoginStagingProfiles(activeProfile) {
 
 async function readCurrentProfile() {
   try {
-    const { stdout } = await execFileAsync(CODEX_SWITCH, ["current"]);
+    const { stdout } = await execFileAsync(getCodexSwitchCommand(), ["current"]);
     return stdout.trim();
   } catch (error) {
     return "unknown";
@@ -1514,18 +1545,19 @@ async function getProfilesState() {
 
 async function runCodexSwitch(args) {
   try {
-    const { stdout, stderr } = await execFileAsync(CODEX_SWITCH, args);
+    const { stdout, stderr } = await execFileAsync(getCodexSwitchCommand(), args);
     return {
       ok: true,
       stdout: stdout.trim(),
       stderr: stderr.trim()
     };
   } catch (error) {
+    const missingBinary = error && error.code === "ENOENT";
     return {
       ok: false,
       stdout: String(error.stdout || "").trim(),
       stderr: String(error.stderr || "").trim(),
-      message: error.message
+      message: missingBinary ? getCodexSwitchInstallHint() : error.message
     };
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "codex-switch-web",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "author": "Lsogod",
   "description": "Local Codex multi-account switcher with web and menu bar shells",
@@ -27,6 +27,7 @@
     },
     "files": [
       "server.js",
+      "bin/**/*",
       "public/**/*",
       "electron/**/*",
       "package.json"

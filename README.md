@@ -17,9 +17,9 @@
 请直接从 GitHub Releases 下载最新安装包：
 
 - [Releases](https://github.com/Lsogod/codex-switch-web/releases)
-- [最新版本 v0.1.1](https://github.com/Lsogod/codex-switch-web/releases/tag/v0.1.1)
-- [直接下载 DMG](https://github.com/Lsogod/codex-switch-web/releases/download/v0.1.1/Codex-Switch-0.1.1-arm64.dmg)
-- [直接下载 ZIP](https://github.com/Lsogod/codex-switch-web/releases/download/v0.1.1/Codex-Switch-0.1.1-arm64.zip)
+- [最新版本 v0.1.2](https://github.com/Lsogod/codex-switch-web/releases/tag/v0.1.2)
+- [直接下载 DMG](https://github.com/Lsogod/codex-switch-web/releases/download/v0.1.2/Codex-Switch-0.1.2-arm64.dmg)
+- [直接下载 ZIP](https://github.com/Lsogod/codex-switch-web/releases/download/v0.1.2/Codex-Switch-0.1.2-arm64.zip)
 
 当前提供的文件通常有两个：
 
@@ -45,7 +45,7 @@
 如果你更习惯用命令行，可以直接执行下面这组命令：
 
 ```bash
-VERSION="0.1.1"
+VERSION="0.1.2"
 APP_NAME="Codex Switch"
 DMG_NAME="Codex-Switch-${VERSION}-arm64.dmg"
 DOWNLOAD_DIR="$HOME/Downloads/Codex-Switch"
@@ -91,11 +91,59 @@ open -na "/Applications/${APP_NAME}.app"
 在使用这个 App 之前，请先确认你的 Mac 上已经有这些内容：
 
 - 已安装 `Codex`
-- 已安装 `codex-switch`
 - 能正常登录和运行 Codex
 - 机器可以访问 `chatgpt.com`
 
 如果你的网络依赖代理，请先让系统代理或终端代理工作正常，否则额度读取可能失败。
+
+### 什么是 codex-switch
+
+`codex-switch` 是这个项目依赖的一个本地命令行工具。
+
+它的作用很简单：
+
+- 保存当前 `~/.codex` 的账号配置
+- 在多个本地 Codex profile 之间切换
+- 删除、重命名和查看 profile
+
+这个菜单栏 App 自己不直接改写 `~/.codex`，而是调用 `codex-switch` 来完成底层 profile 切换。
+
+对于通过 `DMG` 安装的版本：
+
+- `codex-switch` 已经随 App 一起打包
+- 不需要你再单独安装一次
+
+### 安装 codex-switch
+
+只有在下面这些场景里，你才需要手动安装 `codex-switch`：
+
+- 你是从源码直接运行这个项目
+- 你想在终端里单独使用 `codex-switch`
+
+本仓库已经包含了 `codex-switch` 脚本，你可以直接安装到 `~/.local/bin`：
+
+```bash
+mkdir -p "$HOME/.local/bin"
+
+curl -L --fail \
+  -o "$HOME/.local/bin/codex-switch" \
+  "https://raw.githubusercontent.com/Lsogod/codex-switch-web/main/bin/codex-switch"
+
+chmod +x "$HOME/.local/bin/codex-switch"
+```
+
+如果你的 `PATH` 里还没有 `~/.local/bin`，请补上：
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zshrc"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+安装完成后，可以用下面的命令检查：
+
+```bash
+codex-switch --help
+```
 
 ## 如何使用
 

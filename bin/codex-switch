@@ -1,0 +1,342 @@
+#!/bin/zsh
+set -euo pipefail
+
+CODEX_DIR="${HOME}/.codex"
+PROFILES_DIR="${HOME}/.codex-profiles"
+FORCE=0
+
+usage() {
+  cat <<'EOF'
+Usage:
+  codex-switch list
+  codex-switch current
+  codex-switch save <profile>
+  codex-switch new <profile>
+  codex-switch use <profile>
+  codex-switch rename <old> <new>
+  codex-switch delete <profile>
+  codex-switch path [profile]
+
+Options:
+  --force    Ignore the running-process safety check
+
+Notes:
+  - This is a manual profile switcher for Codex state under ~/.codex.
+  - It does not rotate accounts automatically.
+  - Close Codex before save/use/new unless you intentionally pass --force.
+EOF
+}
+
+die() {
+  print -u2 -- "Error: $*"
+  exit 1
+}
+
+info() {
+  print -- "$*"
+}
+
+validate_name() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "profile name is required"
+  [[ "$name" =~ '^[A-Za-z0-9._@+-]+$' ]] || die "invalid profile name: $name"
+}
+
+ensure_profiles_dir() {
+  mkdir -p "$PROFILES_DIR"
+}
+
+resolved_codex_dir() {
+  if [[ -L "$CODEX_DIR" ]]; then
+    python3 - "$CODEX_DIR" <<'PY'
+import os, sys
+print(os.path.realpath(sys.argv[1]))
+PY
+  else
+    print -- "$CODEX_DIR"
+  fi
+}
+
+current_profile_name() {
+  if [[ -L "$CODEX_DIR" ]]; then
+    local resolved
+    resolved="$(resolved_codex_dir)"
+    case "$resolved" in
+      "$PROFILES_DIR"/*)
+        basename "$resolved"
+        return 0
+        ;;
+    esac
+    print -- "external-link"
+    return 0
+  fi
+
+  if [[ -d "$CODEX_DIR" ]]; then
+    print -- "unmanaged"
+    return 0
+  fi
+
+  print -- "missing"
+}
+
+is_codex_running() {
+  if command -v lsof >/dev/null 2>&1; then
+    local pids
+    pids="$(lsof +D "$CODEX_DIR" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | tr '\n' ' ' | xargs echo -n || true)"
+    if [[ -n "${pids// /}" ]]; then
+      return 0
+    fi
+    return 1
+  fi
+
+  local matches
+  matches="$(ps ax -o command= | grep -E '(^|/)(codex)( |$)|Codex\.app/Contents/MacOS|/Applications/Codex\.app' | grep -v 'codex-switch' || true)"
+  [[ -n "$matches" ]]
+}
+
+require_safe_state() {
+  if (( FORCE )); then
+    return 0
+  fi
+
+  if is_codex_running; then
+    die "Codex appears to be running. Close Codex first, or rerun with --force."
+  fi
+}
+
+copy_profile_payload() {
+  local src="$1"
+  local dst="$2"
+  rm -rf "$dst"
+  mkdir -p "$dst"
+
+  local item
+  for item in auth.json config.toml AGENTS.md models_cache.json; do
+    if [[ -f "${src}/${item}" ]]; then
+      cp "${src}/${item}" "${dst}/${item}"
+    fi
+  done
+
+  for item in rules; do
+    if [[ -d "${src}/${item}" ]]; then
+      cp -R "${src}/${item}" "${dst}/${item}"
+    fi
+  done
+}
+
+save_profile() {
+  local name="$1"
+  validate_name "$name"
+  [[ -e "$CODEX_DIR" ]] || die "~/.codex does not exist"
+
+  ensure_profiles_dir
+  local src dest tmp
+  src="$(resolved_codex_dir)"
+  dest="${PROFILES_DIR}/${name}"
+  tmp="${dest}.tmp.$$"
+  rm -rf "$tmp"
+  copy_profile_payload "$src" "$tmp"
+  rm -rf "$dest"
+  mv "$tmp" "$dest"
+  info "Saved current Codex credentials/config to: $dest"
+}
+
+new_profile() {
+  local name="$1"
+  validate_name "$name"
+  require_safe_state
+  ensure_profiles_dir
+
+  local dest="${PROFILES_DIR}/${name}"
+  [[ ! -e "$dest" ]] || die "profile already exists: $name"
+  mkdir -p "$dest"
+
+  local src
+  src="$(resolved_codex_dir)"
+  if [[ -f "${src}/config.toml" ]]; then
+    cp "${src}/config.toml" "${dest}/config.toml"
+  fi
+  if [[ -d "${src}/rules" ]]; then
+    cp -R "${src}/rules" "${dest}/rules"
+  fi
+  if [[ -f "${src}/AGENTS.md" ]]; then
+    cp "${src}/AGENTS.md" "${dest}/AGENTS.md"
+  fi
+
+  info "Created fresh profile: $dest"
+  info "Next: codex-switch use $name"
+}
+
+use_profile() {
+  local name="$1"
+  validate_name "$name"
+  require_safe_state
+  ensure_profiles_dir
+
+  local dest="${PROFILES_DIR}/${name}"
+  [[ -d "$dest" ]] || die "profile does not exist: $name"
+
+  if [[ -L "$CODEX_DIR" ]]; then
+    local current_target
+    current_target="$(resolved_codex_dir)"
+    if [[ "$current_target" == "$dest" ]]; then
+      info "Already using profile: $name"
+      return 0
+    fi
+    rm "$CODEX_DIR"
+  elif [[ -e "$CODEX_DIR" ]]; then
+    local backup_name backup_dest
+    backup_name="pre-switch-$(date +%Y%m%d-%H%M%S)"
+    backup_dest="${PROFILES_DIR}/${backup_name}"
+    mv "$CODEX_DIR" "$backup_dest"
+    info "Moved unmanaged ~/.codex to: $backup_dest"
+  fi
+
+  ln -s "$dest" "$CODEX_DIR"
+  info "Active Codex profile: $name"
+}
+
+rename_profile() {
+  local old_name="$1"
+  local new_name="$2"
+  validate_name "$old_name"
+  validate_name "$new_name"
+  require_safe_state
+  ensure_profiles_dir
+
+  local src="${PROFILES_DIR}/${old_name}"
+  local dest="${PROFILES_DIR}/${new_name}"
+  [[ -d "$src" ]] || die "profile does not exist: $old_name"
+  [[ ! -e "$dest" ]] || die "target profile already exists: $new_name"
+
+  local active
+  active="$(current_profile_name)"
+  mv "$src" "$dest"
+
+  if [[ "$active" == "$old_name" && -L "$CODEX_DIR" ]]; then
+    rm "$CODEX_DIR"
+    ln -s "$dest" "$CODEX_DIR"
+  fi
+
+  info "Renamed profile: $old_name -> $new_name"
+}
+
+delete_profile() {
+  local name="$1"
+  validate_name "$name"
+  require_safe_state
+  ensure_profiles_dir
+
+  local target="${PROFILES_DIR}/${name}"
+  [[ -d "$target" ]] || die "profile does not exist: $name"
+
+  local active
+  active="$(current_profile_name)"
+  [[ "$active" != "$name" ]] || die "cannot delete the active profile: $name"
+
+  rm -rf "$target"
+  info "Deleted profile: $name"
+}
+
+list_profiles() {
+  ensure_profiles_dir
+  local count=0
+  local active
+  active="$(current_profile_name)"
+  local -a paths
+  paths=("$PROFILES_DIR"/*(N))
+  local path
+  for path in "${paths[@]}"; do
+    [[ -d "$path" ]] || continue
+    count=$((count + 1))
+    local name
+    name="$(basename "$path")"
+    if [[ "$name" == "$active" ]]; then
+      print -- "* $name"
+    else
+      print -- "  $name"
+    fi
+  done
+  if (( count == 0 )); then
+    info "No saved Codex profiles in $PROFILES_DIR"
+  fi
+}
+
+print_path() {
+  ensure_profiles_dir
+  if [[ $# -eq 0 ]]; then
+    print -- "$PROFILES_DIR"
+    return 0
+  fi
+
+  validate_name "$1"
+  print -- "${PROFILES_DIR}/$1"
+}
+
+main() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force)
+        FORCE=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  local command="${1:-}"
+  case "$command" in
+    list)
+      shift
+      list_profiles "$@"
+      ;;
+    current)
+      shift
+      current_profile_name
+      ;;
+    save)
+      shift
+      [[ $# -eq 1 ]] || die "usage: codex-switch save <profile>"
+      save_profile "$1"
+      ;;
+    new)
+      shift
+      [[ $# -eq 1 ]] || die "usage: codex-switch new <profile>"
+      new_profile "$1"
+      ;;
+    use)
+      shift
+      [[ $# -eq 1 ]] || die "usage: codex-switch use <profile>"
+      use_profile "$1"
+      ;;
+    rename)
+      shift
+      [[ $# -eq 2 ]] || die "usage: codex-switch rename <old> <new>"
+      rename_profile "$1" "$2"
+      ;;
+    delete)
+      shift
+      [[ $# -eq 1 ]] || die "usage: codex-switch delete <profile>"
+      delete_profile "$1"
+      ;;
+    path)
+      shift
+      [[ $# -le 1 ]] || die "usage: codex-switch path [profile]"
+      print_path "$@"
+      ;;
+    ""|-h|--help|help)
+      usage
+      ;;
+    *)
+      die "unknown command: $command"
+      ;;
+  esac
+}
+
+main "$@"

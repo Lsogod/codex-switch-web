@@ -300,12 +300,16 @@ function renderProfiles(profiles) {
 
   for (const [index, profile] of visibleProfiles.entries()) {
     const node = profileTemplate.content.firstElementChild.cloneNode(true);
+    const planLabel = String(profile.planType || "-");
+    const planTone = planLabel.trim().toLowerCase();
 
     // Strip bar info
     node.querySelector(".profile-name").textContent = profile.profileName;
     node.querySelector(".profile-email").textContent = profile.email || "未检测到邮箱";
     node.querySelector(".strip-avatar").textContent = getInitial(profile.profileName);
-    node.querySelector(".strip-plan").textContent = profile.planType || "-";
+    const stripPlanEl = node.querySelector(".strip-plan");
+    stripPlanEl.textContent = planLabel;
+    stripPlanEl.dataset.plan = planTone;
 
     // Strip mini usage
     renderStripUsage(node, profile.usage);
@@ -313,7 +317,7 @@ function renderProfiles(profiles) {
     // Detail facts
     node.querySelector(".fact-name").textContent = profile.displayName || "-";
     node.querySelector(".fact-auth-mode").textContent = profile.authMode || "-";
-    node.querySelector(".fact-plan").textContent = profile.planType || "-";
+    node.querySelector(".fact-plan").textContent = planLabel;
     node.querySelector(".fact-refresh").textContent = formatTime(profile.lastRefresh);
     node.querySelector(".fact-path").textContent = formatShortPath(profile.path);
 

@@ -452,6 +452,10 @@ function normalizeUsageResponse(usage) {
   };
 }
 
+function resolvePlanType(metaPlanType, usagePlanType) {
+  return usagePlanType || metaPlanType || null;
+}
+
 function toTimestamp(value) {
   if (!value) {
     return null;
@@ -1302,9 +1306,13 @@ async function getProfilesState() {
   const activeProfile = await readCurrentProfile();
   await cleanupOrphanLoginStagingProfiles(activeProfile);
   const loginStatus = await readLoginStatus();
-  const activeAccount = await readActiveProfileMeta(activeProfile);
+  const activeAccountMeta = await readActiveProfileMeta(activeProfile);
   const activeAuth = await readAuthForProfile(activeProfile);
   const activeUsage = await readUsageForProfile(activeProfile, activeAuth);
+  const activeAccount = {
+    ...activeAccountMeta,
+    planType: resolvePlanType(activeAccountMeta.planType, activeUsage?.data?.planType || null)
+  };
   const localSessions = await readLocalSessions();
   const profileNames = await listProfileNames();
 
@@ -1314,6 +1322,7 @@ async function getProfilesState() {
       const auth = await readJsonIfExists(path.join(dir, "auth.json"));
       const configExists = fs.existsSync(path.join(dir, "config.toml"));
       const usage = await readUsageForProfile(name, auth);
+      const meta = extractProfileMeta(auth);
       return {
         profileName: name,
         path: dir,
@@ -1321,7 +1330,8 @@ async function getProfilesState() {
         hasAuth: Boolean(auth),
         hasConfig: configExists,
         usage,
-        ...extractProfileMeta(auth)
+        ...meta,
+        planType: resolvePlanType(meta.planType, usage?.data?.planType || null)
       };
     })
   );

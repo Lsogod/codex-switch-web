@@ -10,7 +10,10 @@ const STARTUP_ATTEMPTS = 40;
 const STARTUP_DELAY_MS = 500;
 const DASHBOARD_SIZE = { width: 1360, height: 920 };
 const OVERLAY_COLLAPSED_SIZE = { width: 86, height: 96 };
+const OVERLAY_COLLAPSED_NOTICE_SIZE = { width: 168, height: 128 };
 const OVERLAY_EXPANDED_SIZE = { width: 278, height: 96 };
+const OVERLAY_EXPANDED_NOTICE_SIZE = { width: 278, height: 128 };
+const APP_VERSION_REFRESH_MS = 30 * 60 * 1000;
 
 let tray = null;
 let dashboardWindow = null;
@@ -26,6 +29,8 @@ let bundledServerModule = null;
 let appVersionSnapshot = null;
 let appVersionError = null;
 let appVersionRefreshInFlight = null;
+let appVersionRefreshTimer = null;
+let overlayHasUpdateNotice = false;
 let shellState = {
   overlay: {
     enabled: true,
@@ -110,6 +115,9 @@ function normalizeShellState(raw) {
       enabled: raw?.overlay?.enabled !== false,
       x: Number.isFinite(raw?.overlay?.x) ? raw.overlay.x : null,
       y: Number.isFinite(raw?.overlay?.y) ? raw.overlay.y : null
+    },
+    autoUpdateChecks: {
+      enabled: raw?.autoUpdateChecks?.enabled !== false
     }
   };
 }
@@ -246,6 +254,26 @@ function buildVersionSubmenu() {
       enabled: false
     },
     {
+      type: "checkbox",
+      label: "自动检查更新",
+      checked: shellState.autoUpdateChecks.enabled,
+      click: (menuItem) => {
+        shellState.autoUpdateChecks.enabled = menuItem.checked;
+        saveShellState().catch(() => {});
+        if (menuItem.checked) {
+          triggerAppVersionRefresh({ forceRefresh: true });
+          startAppVersionRefreshLoop();
+        } else {
+          stopAppVersionRefreshLoop();
+          syncOverlayUpdateNotice();
+          refreshTrayMenu();
+        }
+        if (overlayWindow && !overlayWindow.isDestroyed()) {
+          overlayWindow.webContents.reloadIgnoringCache();
+        }
+      }
+    },
+    {
       label: "检查更新",
       click: () => {
         checkForUpdatesFromMenu().catch((error) => {
@@ -300,10 +328,6 @@ function buildContextMenu() {
       }
     },
     {
-      label: "版本与更新",
-      submenu: buildVersionSubmenu()
-    },
-    {
       label: "账号列表",
       submenu: buildProfilesSubmenu()
     },
@@ -343,6 +367,10 @@ function buildContextMenu() {
     {
       label: "在浏览器中打开",
       click: () => shell.openExternal(BASE_URL)
+    },
+    {
+      label: "版本与更新",
+      submenu: buildVersionSubmenu()
     },
     { type: "separator" },
     {
@@ -390,7 +418,7 @@ function getDefaultOverlayPosition() {
   const display = screen.getPrimaryDisplay();
   const { workArea } = display;
   return {
-    x: Math.round(workArea.x + workArea.width - OVERLAY_COLLAPSED_SIZE.width - 18),
+    x: Math.round(workArea.x + workArea.width - OVERLAY_COLLAPSED_NOTICE_SIZE.width - 18),
     y: Math.round(workArea.y + 78)
   };
 }
@@ -507,6 +535,13 @@ async function ensureServerRunning() {
   throw new Error(`Menu bar app could not reach ${getHealthUrl()}`);
 }
 
+function getOverlayTargetSize({ expanded = overlayExpanded, hasUpdateNotice = overlayHasUpdateNotice } = {}) {
+  if (expanded) {
+    return hasUpdateNotice ? OVERLAY_EXPANDED_NOTICE_SIZE : OVERLAY_EXPANDED_SIZE;
+  }
+  return hasUpdateNotice ? OVERLAY_COLLAPSED_NOTICE_SIZE : OVERLAY_COLLAPSED_SIZE;
+}
+
 function createDashboardWindow() {
   dashboardWindow = new BrowserWindow({
     width: DASHBOARD_SIZE.width,
@@ -593,8 +628,21 @@ async function updateAppVersionSnapshot({ forceRefresh = false } = {}) {
   return appVersionRefreshInFlight;
 }
 
+function syncOverlayUpdateNotice() {
+  const shouldShow = Boolean(
+    shellState.autoUpdateChecks.enabled &&
+    appVersionSnapshot?.packaged &&
+    appVersionSnapshot?.update?.available
+  );
+  if (shouldShow === overlayHasUpdateNotice) {
+    return;
+  }
+  setOverlayUpdateNoticeVisible(shouldShow).catch(() => {});
+}
+
 async function checkForUpdatesFromMenu() {
   const snapshot = await updateAppVersionSnapshot({ forceRefresh: true });
+  syncOverlayUpdateNotice();
   refreshTrayMenu();
 
   if (!snapshot?.update?.ok) {
@@ -620,6 +668,7 @@ async function checkForUpdatesFromMenu() {
 
 async function installUpdateFromMenu() {
   const snapshot = await updateAppVersionSnapshot({ forceRefresh: true });
+  syncOverlayUpdateNotice();
   refreshTrayMenu();
 
   if (!snapshot?.update?.ok) {
@@ -654,12 +703,44 @@ async function installUpdateFromMenu() {
   }
 }
 
+function triggerAppVersionRefresh({ forceRefresh = false } = {}) {
+  if (!forceRefresh && !shellState.autoUpdateChecks.enabled) {
+    syncOverlayUpdateNotice();
+    refreshTrayMenu();
+    return;
+  }
+  updateAppVersionSnapshot({ forceRefresh })
+    .then(() => {
+      syncOverlayUpdateNotice();
+      refreshTrayMenu();
+    })
+    .catch(() => {});
+}
+
 function triggerMenuProfilesRefresh() {
   updateMenuProfilesSnapshot()
     .then(() => {
       refreshTrayMenu();
     })
     .catch(() => {});
+}
+
+function startAppVersionRefreshLoop() {
+  stopAppVersionRefreshLoop();
+  if (!shellState.autoUpdateChecks.enabled) {
+    return;
+  }
+  appVersionRefreshTimer = setInterval(() => {
+    triggerAppVersionRefresh({ forceRefresh: false });
+  }, APP_VERSION_REFRESH_MS);
+}
+
+function stopAppVersionRefreshLoop() {
+  if (!appVersionRefreshTimer) {
+    return;
+  }
+  clearInterval(appVersionRefreshTimer);
+  appVersionRefreshTimer = null;
 }
 
 function startMenuProfilesRefreshLoop() {
@@ -704,21 +785,30 @@ async function switchToProfileFromMenu(profileName) {
 function prepareAndShowContextMenu(targetWindow = null) {
   showContextMenu(targetWindow);
   triggerMenuProfilesRefresh();
+  if (shellState.autoUpdateChecks.enabled) {
+    triggerAppVersionRefresh({ forceRefresh: false });
+  }
 }
 
 function createOverlayWindow() {
   const position = getOverlayPosition();
   overlayExpanded = false;
+  overlayHasUpdateNotice = Boolean(
+    shellState.autoUpdateChecks.enabled &&
+    appVersionSnapshot?.packaged &&
+    appVersionSnapshot?.update?.available
+  );
+  const initialSize = getOverlayTargetSize();
 
   overlayWindow = new BrowserWindow({
-    width: OVERLAY_COLLAPSED_SIZE.width,
-    height: OVERLAY_COLLAPSED_SIZE.height,
+    width: initialSize.width,
+    height: initialSize.height,
     x: position.x,
     y: position.y,
     minWidth: OVERLAY_COLLAPSED_SIZE.width,
     minHeight: OVERLAY_COLLAPSED_SIZE.height,
     maxWidth: OVERLAY_EXPANDED_SIZE.width,
-    maxHeight: OVERLAY_EXPANDED_SIZE.height,
+    maxHeight: OVERLAY_EXPANDED_NOTICE_SIZE.height,
     frame: false,
     show: false,
     title: "Codex Switch Overlay",
@@ -750,6 +840,7 @@ function createOverlayWindow() {
   overlayWindow.on("closed", () => {
     overlayWindow = null;
     overlayExpanded = false;
+    overlayHasUpdateNotice = false;
     refreshTrayMenu();
   });
   overlayWindow.on("close", (event) => {
@@ -827,13 +918,26 @@ async function setOverlayExpanded(expanded) {
   }
 
   const nextExpanded = Boolean(expanded);
-  if (overlayExpanded === nextExpanded) {
+  const targetSize = getOverlayTargetSize({
+    expanded: nextExpanded,
+    hasUpdateNotice: overlayHasUpdateNotice
+  });
+  const currentBounds = overlayWindow.getBounds();
+  const boundsUnchanged =
+    overlayExpanded === nextExpanded &&
+    currentBounds.width === targetSize.width &&
+    currentBounds.height === targetSize.height;
+
+  if (boundsUnchanged) {
     return true;
   }
 
-  const targetSize = nextExpanded ? OVERLAY_EXPANDED_SIZE : OVERLAY_COLLAPSED_SIZE;
-  const currentBounds = overlayWindow.getBounds();
-  const position = clampWindowToWorkArea(currentBounds.x, currentBounds.y, targetSize.width, targetSize.height);
+  const position = clampWindowToWorkArea(
+    currentBounds.x,
+    currentBounds.y + currentBounds.height - targetSize.height,
+    targetSize.width,
+    targetSize.height
+  );
 
   overlayExpanded = nextExpanded;
   overlayWindow.setBounds({
@@ -846,8 +950,17 @@ async function setOverlayExpanded(expanded) {
   return true;
 }
 
+async function setOverlayUpdateNoticeVisible(visible) {
+  overlayHasUpdateNotice = Boolean(visible);
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    return true;
+  }
+  return setOverlayExpanded(overlayExpanded);
+}
+
 function cleanupServerProcess() {
   stopMenuProfilesRefreshLoop();
+  stopAppVersionRefreshLoop();
 }
 
 async function bootstrap() {
@@ -855,7 +968,9 @@ async function bootstrap() {
   await loadShellState();
   await updateMenuProfilesSnapshot();
   await updateAppVersionSnapshot({ forceRefresh: false });
+  syncOverlayUpdateNotice();
   startMenuProfilesRefreshLoop();
+  startAppVersionRefreshLoop();
 
   app.setName("Codex Switch");
   app.name = "Codex Switch";
@@ -895,6 +1010,7 @@ async function bootstrap() {
 }
 
 ipcMain.handle("shell:get-base-url", () => BASE_URL);
+ipcMain.handle("shell:get-auto-update-checks-enabled", () => shellState.autoUpdateChecks.enabled);
 ipcMain.handle("shell:open-dashboard", async () => {
   await openDashboardWindow();
   return true;
@@ -921,6 +1037,9 @@ ipcMain.handle("shell:set-overlay-position", async (_event, x, y) => {
   overlayWindow.setPosition(position.x, position.y, false);
   queueOverlayBoundsSave();
   return true;
+});
+ipcMain.handle("shell:set-overlay-update-notice-visible", async (_event, visible) => {
+  return setOverlayUpdateNoticeVisible(visible);
 });
 ipcMain.handle("shell:show-context-menu", () => {
   prepareAndShowContextMenu(overlayWindow && !overlayWindow.isDestroyed() ? overlayWindow : null);

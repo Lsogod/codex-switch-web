@@ -45,11 +45,19 @@ body[data-dragging="true"] {
   height: 100%;
   padding: 8px 10px 10px;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end;
 }
 
-body[data-expanded="true"] .overlay-shell {
+.overlay-main {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+body[data-expanded="true"] .overlay-main {
   justify-content: flex-start;
 }
 
@@ -83,6 +91,54 @@ body[data-expanded="true"] .control-button {
 
 .control-button:hover {
   background: rgba(30, 41, 59, 0.94);
+}
+
+.update-banner {
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 8px 10px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.94), rgba(30, 41, 59, 0.92));
+  border: 1px solid rgba(96, 165, 250, 0.3);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.24);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.update-banner.hidden {
+  display: none;
+}
+
+.update-banner-text {
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+  color: rgba(248, 250, 252, 0.94);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.update-banner-button {
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: linear-gradient(180deg, #3b82f6, #2563eb);
+  color: #fff;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.update-banner-button:hover {
+  background: linear-gradient(180deg, #4b8df7, #2d6cf0);
 }
 
 .orb-stack {

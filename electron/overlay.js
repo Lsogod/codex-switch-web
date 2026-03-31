@@ -3,12 +3,18 @@ const quotaLabelEl = document.querySelector("#quotaLabel");
 const resetTimeEl = document.querySelector("#resetTime");
 const hideButtonEl = document.querySelector("#hideButton");
 const accountNameEl = document.querySelector("#accountName");
+const updateBannerEl = document.querySelector("#updateBanner");
+const updateBannerTextEl = document.querySelector("#updateBannerText");
+const updateBannerButtonEl = document.querySelector("#updateBannerButton");
 
 let baseUrl = "";
 let expanded = false;
 let collapseTimer = null;
 let dragState = null;
 let pendingDragFrame = null;
+let updateState = {
+  visible: false
+};
 
 function clampPercent(value) {
   if (!Number.isFinite(value)) return 0;
@@ -75,6 +81,28 @@ async function fetchState() {
   return response.json();
 }
 
+async function fetchVersionState() {
+  const response = await fetch(`${baseUrl}/api/app/version`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error("Failed to fetch app version");
+  }
+  return response.json();
+}
+
+async function installUpdate() {
+  const response = await fetch(`${baseUrl}/api/app/update/install`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    }
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || data.message || "安装更新失败");
+  }
+  return data;
+}
+
 async function setExpanded(nextExpanded) {
   if (expanded === nextExpanded) {
     return;
@@ -113,6 +141,31 @@ async function refresh() {
     accountNameEl.textContent = "额度读取失败";
     document.documentElement.style.setProperty("--progress", "0%");
     document.body.dataset.tone = "danger";
+  }
+}
+
+async function refreshVersion() {
+  try {
+    const autoChecksEnabled = await window.codexShell.getAutoUpdateChecksEnabled();
+    const result = await fetchVersionState();
+    const appState = result.app;
+    const update = appState?.update;
+    const visible = Boolean(autoChecksEnabled && appState?.packaged && update?.available);
+    updateState.visible = visible;
+
+    if (visible) {
+      updateBannerTextEl.textContent = `发现 ${update.latestVersionLabel}`;
+      updateBannerButtonEl.disabled = false;
+      updateBannerEl.classList.remove("hidden");
+    } else {
+      updateBannerEl.classList.add("hidden");
+    }
+
+    await window.codexShell.setOverlayUpdateNoticeVisible(visible);
+  } catch {
+    updateState.visible = false;
+    updateBannerEl.classList.add("hidden");
+    await window.codexShell.setOverlayUpdateNoticeVisible(false);
   }
 }
 
@@ -161,8 +214,25 @@ hideButtonEl.addEventListener("click", async (event) => {
   await window.codexShell.hideOverlay();
 });
 
+updateBannerButtonEl.addEventListener("click", async (event) => {
+  event.stopPropagation();
+  if (!updateState.visible) {
+    return;
+  }
+  updateBannerButtonEl.disabled = true;
+  updateBannerButtonEl.textContent = "更新中";
+  updateBannerTextEl.textContent = "正在安装更新…";
+  try {
+    await installUpdate();
+  } catch (error) {
+    updateBannerTextEl.textContent = error.message || "更新失败";
+    updateBannerButtonEl.disabled = false;
+    updateBannerButtonEl.textContent = "重试";
+  }
+});
+
 document.body.addEventListener("mousedown", (event) => {
-  if (event.button !== 0 || event.target.closest("#hideButton")) {
+  if (event.button !== 0 || event.target.closest("#hideButton") || event.target.closest("#updateBannerButton")) {
     return;
   }
   event.preventDefault();
@@ -203,5 +273,7 @@ document.body.addEventListener("mouseleave", () => {
   document.body.dataset.expanded = "false";
   document.body.dataset.dragging = "false";
   await refresh();
+  await refreshVersion();
   window.setInterval(refresh, 5000);
+  window.setInterval(refreshVersion, 60 * 1000);
 })();

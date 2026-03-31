@@ -8,22 +8,28 @@
   </head>
   <body>
     <div class="overlay-shell">
+      <section id="updateBanner" class="update-banner hidden">
+        <span id="updateBannerText" class="update-banner-text">发现新版本</span>
+        <button id="updateBannerButton" class="update-banner-button" type="button">更新</button>
+      </section>
       <button id="hideButton" class="control-button" type="button" aria-label="关闭悬浮额度">×</button>
-      <div class="orb-stack" aria-live="polite">
-        <div class="orb-wrap">
-          <div class="quota-ring">
-            <div class="quota-core">
-              <span id="quotaPercent" class="quota-percent">--%</span>
-              <span id="quotaLabel" class="quota-label">额度</span>
+      <div class="overlay-main">
+        <div class="orb-stack" aria-live="polite">
+          <div class="orb-wrap">
+            <div class="quota-ring">
+              <div class="quota-core">
+                <span id="quotaPercent" class="quota-percent">--%</span>
+                <span id="quotaLabel" class="quota-label">额度</span>
+              </div>
             </div>
           </div>
+          <span id="resetTime" class="reset-time">--/-- --:--</span>
         </div>
-        <span id="resetTime" class="reset-time">--/-- --:--</span>
+        <section class="info-panel">
+          <span class="info-kicker">当前账号</span>
+          <span id="accountName" class="account-name">读取中</span>
+        </section>
       </div>
-      <section class="info-panel">
-        <span class="info-kicker">当前账号</span>
-        <span id="accountName" class="account-name">读取中</span>
-      </section>
     </div>
     <script src="./overlay.js"></script>
   </body>

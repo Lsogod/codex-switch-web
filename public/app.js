@@ -14,10 +14,15 @@ const appVersionChipEl = document.querySelector("#appVersionChip");
 const appUpdateStatusEl = document.querySelector("#appUpdateStatus");
 const checkUpdateButtonEl = document.querySelector("#checkUpdateButton");
 const installUpdateButtonEl = document.querySelector("#installUpdateButton");
+const usageNoticeEl = document.querySelector("#usageNotice");
+const usageNoticeTextEl = document.querySelector("#usageNoticeText");
+const usageNoticeCloseEl = document.querySelector("#usageNoticeClose");
 let autoRegisterInFlight = false;
 let versionLoadInFlight = false;
 let appVersionState = null;
 const expandedProfiles = new Set();
+const usageRenderCache = new Map();
+let dismissedUsageNoticeKey = null;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -89,6 +94,48 @@ function getUsageStatusLabel(percent) {
 
 function formatResetLabel(value) {
   return value ? `重置 ${formatTime(value)}` : "重置时间未知";
+}
+
+function getUsageIssueText(usage) {
+  if (!usage) return null;
+  if (usage.fallback === true) {
+    return usage.issue?.message || "当前网络异常，正在显示上次成功数据";
+  }
+  return usage.issue?.message || null;
+}
+
+function hasRenderableUsage(usage) {
+  return Boolean(usage && usage.ok !== false && usage.data?.summary && usage.data.summary.remainingPercent != null);
+}
+
+function cloneUsageForDisplay(usage, issueText) {
+  if (!hasRenderableUsage(usage)) return null;
+  return {
+    ok: true,
+    data: usage.data,
+    rawFetchedAt: usage.rawFetchedAt || null,
+    fallback: true,
+    issue: {
+      level: "warn",
+      message: issueText || "当前读取失败，正在显示上次成功数据"
+    }
+  };
+}
+
+function getDisplayUsage(cacheKey, usage) {
+  if (hasRenderableUsage(usage)) {
+    if (usage.fallback !== true) {
+      usageRenderCache.set(cacheKey, {
+        ok: true,
+        data: usage.data,
+        rawFetchedAt: usage.rawFetchedAt || null
+      });
+    }
+    return usage;
+  }
+
+  const cached = usageRenderCache.get(cacheKey);
+  return cloneUsageForDisplay(cached, getUsageIssueText(usage) || usage?.error) || usage;
 }
 
 function renderVersionState(appState) {
@@ -195,33 +242,57 @@ function getCreditSummary(usage) {
 }
 
 function getUsageSummary(usage) {
-  if (!usage) return { title: "未查询额度", meta: "-", percent: 0, tone: "warn" };
-  if (usage.ok === false) return { title: "额度不可用", meta: usage.error || "查询失败", percent: 0, tone: "danger" };
+  if (!usage) return { title: "未查询额度", meta: "还没有拿到额度数据", percent: null, tone: "warn" };
+  if (usage.ok === false) return { title: "额度异常", meta: usage.error || "查询失败", percent: null, tone: "danger" };
   const data = usage.data;
   if (!data || !data.summary || data.summary.remainingPercent == null) {
-    return { title: "额度不可用", meta: "当前账号未返回额度信息", percent: 0, tone: "warn" };
+    return { title: "额度异常", meta: "当前账号未返回额度信息", percent: null, tone: "warn" };
   }
   const percent = clampPercent(data.summary.remainingPercent);
   return {
     title: `${getUsageStatusLabel(percent)} · ${percent}%`,
-    meta: `${data.summary.label} · ${formatResetLabel(data.summary.resetAt)}`,
+    meta: [data.summary.label, formatResetLabel(data.summary.resetAt)].filter(Boolean).join(" · "),
     percent,
     tone: getUsageTone(percent)
   };
 }
 
-function renderUsageBox(node, usage) {
+function getUsageNoticeKey(activeProfile, usage) {
+  const startedAt = usage?.issue?.startedAt;
+  if (!activeProfile || !startedAt) return null;
+  return `${activeProfile}:${startedAt}`;
+}
+
+function renderUsageNotice(activeProfile, usage) {
+  const issue = usage?.issue;
+  const noticeKey = getUsageNoticeKey(activeProfile, usage);
+  if (!issue?.showNotice || !noticeKey || dismissedUsageNoticeKey === noticeKey) {
+    usageNoticeEl.classList.add("hidden");
+    usageNoticeTextEl.textContent = "";
+    usageNoticeCloseEl.dataset.noticeKey = "";
+    return;
+  }
+
+  usageNoticeTextEl.textContent = hasRenderableUsage(usage)
+    ? "额度已连续 5 分钟读取失败，当前继续显示上次成功结果。"
+    : "额度已连续 5 分钟读取失败，请检查网络或重新登录。";
+  usageNoticeCloseEl.dataset.noticeKey = noticeKey;
+  usageNoticeEl.classList.remove("hidden");
+}
+
+function renderUsageBox(node, usage, cacheKey) {
   const titleEl = node.querySelector(".usage-title");
   const noteEl = node.querySelector(".usage-note");
   const badgeEl = node.querySelector(".usage-badge");
   const linesEl = node.querySelector(".usage-lines");
-  const summary = getUsageSummary(usage);
-  const entries = getUsageEntries(usage);
-  const credit = getCreditSummary(usage);
+  const displayUsage = getDisplayUsage(cacheKey, usage);
+  const summary = getUsageSummary(displayUsage);
+  const entries = getUsageEntries(displayUsage);
+  const credit = getCreditSummary(displayUsage);
 
   titleEl.textContent = summary.title;
   noteEl.textContent = summary.meta;
-  badgeEl.textContent = `${summary.percent}%`;
+  badgeEl.textContent = summary.percent == null ? "--" : `${summary.percent}%`;
   badgeEl.dataset.tone = summary.tone;
   linesEl.innerHTML = "";
 
@@ -279,14 +350,14 @@ function renderUsageBox(node, usage) {
   }
 }
 
-function renderStripUsage(node, usage) {
+function renderStripUsage(node, usage, cacheKey) {
   const pctEl = node.querySelector(".strip-usage-pct");
   const fillEl = node.querySelector(".strip-usage-fill");
-  const summary = getUsageSummary(usage);
+  const summary = getUsageSummary(getDisplayUsage(cacheKey, usage));
 
-  pctEl.textContent = `${summary.percent}%`;
+  pctEl.textContent = summary.percent == null ? "--" : `${summary.percent}%`;
   pctEl.dataset.tone = summary.tone;
-  fillEl.style.width = `${summary.percent}%`;
+  fillEl.style.width = `${summary.percent == null ? 0 : summary.percent}%`;
   fillEl.dataset.tone = summary.tone;
 }
 
@@ -299,9 +370,9 @@ function getResetTimeShort(usage) {
   return date.toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
-function renderStripReset(node, usage) {
+function renderStripReset(node, usage, cacheKey) {
   const labelEl = node.querySelector(".strip-reset-label");
-  const resetTime = getResetTimeShort(usage);
+  const resetTime = getResetTimeShort(getDisplayUsage(cacheKey, usage));
   if (resetTime) {
     labelEl.textContent = `重置 ${resetTime}`;
     labelEl.classList.remove("muted");
@@ -375,7 +446,7 @@ function renderProfiles(profiles) {
     stripPlanEl.dataset.plan = planTone;
 
     // Strip mini usage
-    renderStripUsage(node, profile.usage);
+    renderStripUsage(node, profile.usage, profile.profileName);
 
     // Detail facts
     node.querySelector(".fact-name").textContent = profile.displayName || "-";
@@ -385,8 +456,8 @@ function renderProfiles(profiles) {
     node.querySelector(".fact-path").textContent = formatShortPath(profile.path);
 
     // Reset time & usage box
-    renderStripReset(node, profile.usage);
-    renderUsageBox(node, profile.usage);
+    renderStripReset(node, profile.usage, profile.profileName);
+    renderUsageBox(node, profile.usage, profile.profileName);
 
     // Active state
     const activeChip = node.querySelector(".strip-active-dot");
@@ -494,11 +565,12 @@ async function loadState() {
   activeAccountEmailEl.textContent = state.activeAccount?.email || "未检测到";
   activeAccountEmailEl.title = state.activeAccount?.email || "";
 
-  const activeUsageSummary = getUsageSummary(state.activeUsage);
+  const activeUsageSummary = getUsageSummary(getDisplayUsage(`active:${state.activeProfile || "unknown"}`, state.activeUsage));
   activeUsageTitleEl.textContent = activeUsageSummary.title;
   activeUsageTitleEl.title = `${activeUsageSummary.title} · ${activeUsageSummary.meta}`;
-  activeUsageMeterBarEl.style.width = `${activeUsageSummary.percent}%`;
+  activeUsageMeterBarEl.style.width = `${activeUsageSummary.percent == null ? 0 : activeUsageSummary.percent}%`;
   activeUsageMeterBarEl.dataset.tone = activeUsageSummary.tone;
+  renderUsageNotice(state.activeProfile, state.activeUsage);
 
   renderAutoSwitch(state.autoSwitch);
   renderProfiles(state.profiles);
@@ -623,6 +695,11 @@ installUpdateButtonEl.addEventListener("click", async () => {
     installUpdateButtonEl.disabled = false;
     showToast(error.message, "error");
   }
+});
+
+usageNoticeCloseEl.addEventListener("click", () => {
+  dismissedUsageNoticeKey = usageNoticeCloseEl.dataset.noticeKey || null;
+  usageNoticeEl.classList.add("hidden");
 });
 
 loadAndMaybeAutoRegister({ silent: true }).catch((error) => {

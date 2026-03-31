@@ -950,6 +950,44 @@ dd {
   text-align: center;
 }
 
+/* ===== Notice ===== */
+
+.mini-notice {
+  position: sticky;
+  top: 138px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.22);
+  color: #9a6700;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+}
+
+.mini-notice-text {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.mini-notice-close {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: rgba(146, 64, 14, 0.8);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  flex: 0 0 auto;
+}
+
 /* ===== Toast ===== */
 
 .toast {
@@ -1004,6 +1042,10 @@ dd {
     flex-direction: column;
     align-items: stretch;
     gap: 8px;
+  }
+
+  .mini-notice {
+    top: 0;
   }
 
   .toolbar-group {

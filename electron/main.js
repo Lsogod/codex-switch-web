@@ -583,19 +583,31 @@ async function updateMenuProfilesSnapshot() {
   menuProfilesRefreshInFlight = (async () => {
     try {
       const state = await getLocalJson("/api/state");
+      const previousByName = new Map(menuProfilesSnapshot.map((profile) => [profile.profileName, profile]));
       menuProfilesSnapshot = Array.isArray(state?.profiles)
         ? state.profiles.map((profile) => ({
+            ...(previousByName.get(profile.profileName) || {}),
             profileName: profile.profileName,
             active: profile.active === true,
             planType: profile.planType || profile.usage?.data?.planType || null,
-            remainingPercent: profile.priority?.remainingPercent ?? profile.usage?.data?.summary?.remainingPercent ?? null,
-            resetAt: profile.priority?.resetAt || profile.usage?.data?.summary?.resetAt || null
+            remainingPercent:
+              profile.priority?.remainingPercent ??
+              profile.usage?.data?.summary?.remainingPercent ??
+              previousByName.get(profile.profileName)?.remainingPercent ??
+              null,
+            resetAt:
+              profile.priority?.resetAt ||
+              profile.usage?.data?.summary?.resetAt ||
+              previousByName.get(profile.profileName)?.resetAt ||
+              null,
+            issue: profile.usage?.issue?.message || (profile.usage?.ok === false ? (profile.usage?.error || "额度异常") : null)
           }))
         : [];
       menuProfilesError = null;
     } catch (error) {
-      menuProfilesSnapshot = [];
-      menuProfilesError = error.message || "未知错误";
+      if (!menuProfilesSnapshot.length) {
+        menuProfilesError = error.message || "未知错误";
+      }
     } finally {
       menuProfilesRefreshInFlight = null;
     }

@@ -24,6 +24,7 @@ const PROFILE_POLL_ATTEMPTS = 12;
 const PROFILE_POLL_DELAY_MS = 250;
 const USAGE_CACHE_TTL_MS = 5 * 1000;
 const USAGE_FETCH_TIMEOUT_MS = 3 * 1000;
+const USAGE_FAILURE_NOTICE_AFTER_MS = 5 * 60 * 1000;
 const AUTO_SWITCH_POLL_MS = 15 * 1000;
 const AUTO_SWITCH_COOLDOWN_MS = 45 * 1000;
 const LOGIN_STAGING_PREFIX = "login-staging-";
@@ -52,7 +53,9 @@ const UPDATE_CACHE_TTL_MS = 10 * 60 * 1000;
 const GITHUB_REPO = "Lsogod/codex-switch-web";
 const RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
 const LATEST_RELEASE_API_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
+const USAGE_SNAPSHOT_FILE = path.join(PROFILES_DIR, ".usage-last-success.json");
 const usageCache = new Map();
+let usageSnapshotStore = null;
 const updateCache = {
   expiresAt: 0,
   value: null
@@ -558,6 +561,83 @@ function resolvePlanType(metaPlanType, usagePlanType) {
   return usagePlanType || metaPlanType || null;
 }
 
+function usageHasSummary(usage) {
+  return Boolean(usage && usage.ok !== false && usage.data?.summary && usage.data.summary.remainingPercent != null);
+}
+
+function loadUsageSnapshotStore() {
+  if (usageSnapshotStore) {
+    return usageSnapshotStore;
+  }
+
+  try {
+    usageSnapshotStore = JSON.parse(fs.readFileSync(USAGE_SNAPSHOT_FILE, "utf8"));
+  } catch {
+    usageSnapshotStore = {};
+  }
+  if (!usageSnapshotStore || typeof usageSnapshotStore !== "object" || Array.isArray(usageSnapshotStore)) {
+    usageSnapshotStore = {};
+  }
+  return usageSnapshotStore;
+}
+
+function persistUsageSnapshotStore() {
+  try {
+    fs.mkdirSync(PROFILES_DIR, { recursive: true });
+    fs.writeFileSync(USAGE_SNAPSHOT_FILE, JSON.stringify(loadUsageSnapshotStore(), null, 2));
+  } catch {}
+}
+
+function getPersistedUsageSuccess(cacheKey) {
+  const snapshot = loadUsageSnapshotStore()[cacheKey];
+  if (!usageHasSummary(snapshot)) {
+    return null;
+  }
+  return {
+    ok: true,
+    data: snapshot.data,
+    rawFetchedAt: snapshot.rawFetchedAt || null
+  };
+}
+
+function setPersistedUsageSuccess(cacheKey, usage) {
+  if (!usageHasSummary(usage)) {
+    return;
+  }
+  const store = loadUsageSnapshotStore();
+  store[cacheKey] = {
+    ok: true,
+    data: usage.data,
+    rawFetchedAt: usage.rawFetchedAt || null
+  };
+  persistUsageSnapshotStore();
+}
+
+function buildUsageFallbackValue(lastSuccessValue, message) {
+  if (!usageHasSummary(lastSuccessValue)) {
+    return null;
+  }
+
+  return {
+    ok: true,
+    data: lastSuccessValue.data,
+    rawFetchedAt: lastSuccessValue.rawFetchedAt || null,
+    fallback: true
+  };
+}
+
+function buildUsageIssue(message, startedAt, level = "warn") {
+  const startedAtMs = toTimestamp(startedAt);
+  const showNotice = Number.isFinite(startedAtMs) && (Date.now() - startedAtMs) >= USAGE_FAILURE_NOTICE_AFTER_MS;
+  return {
+    level,
+    message: message || "额度读取失败",
+    startedAt: startedAt || null,
+    noticeAfterMs: USAGE_FAILURE_NOTICE_AFTER_MS,
+    showNotice
+  };
+}
+
 function toTimestamp(value) {
   if (!value) {
     return null;
@@ -696,6 +776,9 @@ function buildUsagePriority(usage, now = Date.now()) {
   const reasonParts = [`剩余 ${remainingPercent}%`, formatDurationLabel(resetAtMs == null ? NaN : resetAtMs - now), formatAgeLabel(fetchedAgeSeconds)];
   if (!blocked) {
     reasonParts.push("优先消耗更早重置的账号，其次处理剩余更少的账号");
+  }
+  if (usage.fallback === true && usage.issue?.message) {
+    reasonParts.push(usage.issue.message);
   }
   if (credits?.unlimited) {
     reasonParts.push("附带无限 credit");
@@ -1100,22 +1183,64 @@ async function readUsageForProfile(name, auth) {
   }
 
   let value;
+  const lastSuccessValue =
+    (usageHasSummary(cached?.lastSuccessValue) ? cached.lastSuccessValue : null) ||
+    getPersistedUsageSuccess(cacheKey);
+  const previousFailureState = cached?.failureState || null;
+  let latestLiveSuccessValue = null;
+  let nextFailureState = previousFailureState;
   try {
     const raw = await readUsageForAuth(auth);
-    value = raw ? { ok: true, data: normalizeUsageResponse(raw), rawFetchedAt: new Date().toISOString() } : null;
+    const liveValue = raw ? { ok: true, data: normalizeUsageResponse(raw), rawFetchedAt: new Date().toISOString() } : null;
+    if (usageHasSummary(liveValue)) {
+      latestLiveSuccessValue = liveValue;
+      value = liveValue;
+      nextFailureState = null;
+    } else {
+      const startedAt = previousFailureState?.startedAt || new Date().toISOString();
+      const message = "当前额度接口没有返回有效数据，正在显示上次成功结果";
+      value = buildUsageFallbackValue(lastSuccessValue, message);
+      nextFailureState = { startedAt };
+      if (value) {
+        value.issue = buildUsageIssue(message, startedAt, "warn");
+      }
+      if (!value) {
+        value = {
+          ok: false,
+          error: "当前账号未返回额度信息",
+          issue: buildUsageIssue("当前账号未返回额度信息", startedAt, "warn")
+        };
+      }
+    }
   } catch (error) {
-    value = {
+    const errorMessage =
+      error.status === 401 || error.status === 403
+        ? "额度接口鉴权失败，可能需要重新登录"
+        : error.message || "额度查询失败";
+    const startedAt = previousFailureState?.startedAt || new Date().toISOString();
+    value = buildUsageFallbackValue(lastSuccessValue, `${errorMessage}，正在显示上次成功结果`) || {
       ok: false,
-      error:
-        error.status === 401 || error.status === 403
-            ? "Usage unavailable. Re-login may be required."
-            : error.message
+      error: errorMessage
     };
+    nextFailureState = { startedAt };
+    if (value) {
+      value.issue = buildUsageIssue(value.ok === false ? errorMessage : `${errorMessage}，正在显示上次成功结果`, startedAt, value.ok === false ? "danger" : "warn");
+    }
+  }
+
+  if (usageHasSummary(latestLiveSuccessValue)) {
+    setPersistedUsageSuccess(cacheKey, latestLiveSuccessValue);
   }
 
   usageCache.set(cacheKey, {
     expiresAt: now + USAGE_CACHE_TTL_MS,
-    value
+    value,
+    lastSuccessValue: usageHasSummary(value) ? {
+      ok: true,
+      data: value.data,
+      rawFetchedAt: value.rawFetchedAt || null
+    } : lastSuccessValue,
+    failureState: nextFailureState
   });
   return value;
 }

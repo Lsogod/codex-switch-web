@@ -6,6 +6,9 @@ const accountNameEl = document.querySelector("#accountName");
 const updateBannerEl = document.querySelector("#updateBanner");
 const updateBannerTextEl = document.querySelector("#updateBannerText");
 const updateBannerButtonEl = document.querySelector("#updateBannerButton");
+const usageBannerEl = document.querySelector("#usageBanner");
+const usageBannerTextEl = document.querySelector("#usageBannerText");
+const usageBannerCloseEl = document.querySelector("#usageBannerClose");
 
 let baseUrl = "";
 let expanded = false;
@@ -15,6 +18,8 @@ let pendingDragFrame = null;
 let updateState = {
   visible: false
 };
+let lastRenderableUsage = null;
+let dismissedUsageNoticeKey = null;
 
 function clampPercent(value) {
   if (!Number.isFinite(value)) return 0;
@@ -37,23 +42,77 @@ function getUsageLabel(percent) {
 
 function getUsageSummary(usage) {
   if (!usage) {
-    return { percent: 0, tone: "warn", resetAt: null };
+    return { percent: null, tone: "warn", resetAt: null, issue: "还没有拿到额度数据" };
   }
   if (usage.ok === false) {
-    return { percent: 0, tone: "danger", resetAt: null };
+    return { percent: null, tone: "danger", resetAt: null, issue: usage.error || "额度读取失败" };
   }
 
   const summary = usage.data?.summary;
   if (!summary || summary.remainingPercent == null) {
-    return { percent: 0, tone: "warn", resetAt: null };
+    return { percent: null, tone: "warn", resetAt: null, issue: "当前账号未返回额度信息" };
   }
 
   const percent = clampPercent(summary.remainingPercent);
   return {
     percent,
     tone: getUsageTone(percent),
-    resetAt: summary.resetAt || null
+    resetAt: summary.resetAt || null,
+    issue: usage.issue?.message || null
   };
+}
+
+function hasRenderableUsage(usage) {
+  return Boolean(usage && usage.ok !== false && usage.data?.summary && usage.data.summary.remainingPercent != null);
+}
+
+function getDisplayUsage(usage) {
+  if (hasRenderableUsage(usage)) {
+    if (usage.fallback !== true) {
+      lastRenderableUsage = {
+        ok: true,
+        data: usage.data,
+        rawFetchedAt: usage.rawFetchedAt || null
+      };
+    }
+    return usage;
+  }
+  if (lastRenderableUsage) {
+    return {
+      ok: true,
+      data: lastRenderableUsage.data,
+      rawFetchedAt: lastRenderableUsage.rawFetchedAt || null,
+      fallback: true,
+      issue: {
+        level: "warn",
+        message: usage?.issue?.message || usage?.error || "当前读取失败，正在显示上次成功数据"
+      }
+    };
+  }
+  return usage;
+}
+
+function getUsageNoticeKey(activeProfile, usage) {
+  const startedAt = usage?.issue?.startedAt;
+  if (!activeProfile || !startedAt) return null;
+  return `${activeProfile}:${startedAt}`;
+}
+
+function renderUsageBanner(activeProfile, usage) {
+  const issue = usage?.issue;
+  const noticeKey = getUsageNoticeKey(activeProfile, usage);
+  if (!issue?.showNotice || !noticeKey || dismissedUsageNoticeKey === noticeKey) {
+    usageBannerEl.classList.add("hidden");
+    usageBannerTextEl.textContent = "";
+    usageBannerCloseEl.dataset.noticeKey = "";
+    return;
+  }
+
+  usageBannerTextEl.textContent = hasRenderableUsage(usage)
+    ? "额度已连续 5 分钟读取失败，继续显示旧数据"
+    : "额度已连续 5 分钟读取失败，请检查网络";
+  usageBannerCloseEl.dataset.noticeKey = noticeKey;
+  usageBannerEl.classList.remove("hidden");
 }
 
 function formatResetTime(value) {
@@ -122,17 +181,21 @@ function scheduleCollapse() {
 async function refresh() {
   try {
     const state = await fetchState();
-    const usage = getUsageSummary(state.activeUsage);
+    const displayUsage = getDisplayUsage(state.activeUsage);
+    const usage = getUsageSummary(displayUsage);
     const activeAccount = state.activeAccount || {};
 
-    quotaPercentEl.textContent = `${usage.percent}%`;
-    quotaPercentEl.title = `${getUsageLabel(usage.percent)} · ${usage.percent}%`;
-    quotaLabelEl.textContent = getUsageLabel(usage.percent);
+    quotaPercentEl.textContent = usage.percent == null ? "--%" : `${usage.percent}%`;
+    quotaPercentEl.title = usage.percent == null ? (usage.issue || "额度状态未知") : `${getUsageLabel(usage.percent)} · ${usage.percent}%`;
+    quotaLabelEl.textContent = usage.percent == null ? "异常" : getUsageLabel(usage.percent);
+    quotaLabelEl.title = usage.issue || quotaLabelEl.textContent;
     resetTimeEl.textContent = formatResetTime(usage.resetAt);
-    resetTimeEl.title = `重置 ${formatResetTime(usage.resetAt)}`;
+    resetTimeEl.title = usage.issue ? `${usage.issue} · 重置 ${formatResetTime(usage.resetAt)}` : `重置 ${formatResetTime(usage.resetAt)}`;
     accountNameEl.textContent = activeAccount.email || activeAccount.displayName || state.activeProfile || "未识别账号";
-    document.documentElement.style.setProperty("--progress", `${usage.percent}%`);
+    accountNameEl.title = usage.issue || accountNameEl.textContent;
+    document.documentElement.style.setProperty("--progress", `${usage.percent == null ? 0 : usage.percent}%`);
     document.body.dataset.tone = usage.tone;
+    renderUsageBanner(state.activeProfile || activeAccount.email || "unknown", displayUsage);
   } catch {
     quotaPercentEl.textContent = "--%";
     quotaLabelEl.textContent = "异常";
@@ -141,6 +204,7 @@ async function refresh() {
     accountNameEl.textContent = "额度读取失败";
     document.documentElement.style.setProperty("--progress", "0%");
     document.body.dataset.tone = "danger";
+    usageBannerEl.classList.add("hidden");
   }
 }
 
@@ -214,6 +278,12 @@ hideButtonEl.addEventListener("click", async (event) => {
   await window.codexShell.hideOverlay();
 });
 
+usageBannerCloseEl.addEventListener("click", (event) => {
+  event.stopPropagation();
+  dismissedUsageNoticeKey = usageBannerCloseEl.dataset.noticeKey || null;
+  usageBannerEl.classList.add("hidden");
+});
+
 updateBannerButtonEl.addEventListener("click", async (event) => {
   event.stopPropagation();
   if (!updateState.visible) {
@@ -232,7 +302,7 @@ updateBannerButtonEl.addEventListener("click", async (event) => {
 });
 
 document.body.addEventListener("mousedown", (event) => {
-  if (event.button !== 0 || event.target.closest("#hideButton") || event.target.closest("#updateBannerButton")) {
+  if (event.button !== 0 || event.target.closest("#hideButton") || event.target.closest("#updateBannerButton") || event.target.closest("#usageBannerClose")) {
     return;
   }
   event.preventDefault();

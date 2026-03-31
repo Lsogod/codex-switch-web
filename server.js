@@ -1056,6 +1056,7 @@ DMG_PATH="$2"
 TARGET_APP="$3"
 LOG_PATH="$4"
 MOUNT_DIR="$(mktemp -d /tmp/codex-switch-update.XXXXXX)"
+APP_NAME="$(basename "$TARGET_APP" .app)"
 
 cleanup() {
   /usr/bin/hdiutil detach "$MOUNT_DIR" -quiet >/dev/null 2>&1 || true
@@ -1067,15 +1068,26 @@ cleanup() {
 trap cleanup EXIT
 
 echo "[$(/bin/date '+%Y-%m-%d %H:%M:%S')] updater start" >>"$LOG_PATH"
+/bin/echo "stopping app: $APP_NAME pid=$PARENT_PID" >>"$LOG_PATH"
 /bin/sleep 1
+/usr/bin/osascript -e "tell application \\"$APP_NAME\\" to quit" >/dev/null 2>&1 || true
 /bin/kill -TERM "$PARENT_PID" >/dev/null 2>&1 || true
 
-for _ in {1..120}; do
+for _ in {1..8}; do
   if ! /bin/kill -0 "$PARENT_PID" >/dev/null 2>&1; then
     break
   fi
   /bin/sleep 1
 done
+
+if /bin/kill -0 "$PARENT_PID" >/dev/null 2>&1; then
+  /bin/echo "app still running after graceful quit, forcing stop" >>"$LOG_PATH"
+  /bin/kill -KILL "$PARENT_PID" >/dev/null 2>&1 || true
+  /usr/bin/pkill -KILL -f "$TARGET_APP/Contents/MacOS/" >/dev/null 2>&1 || true
+  /bin/sleep 1
+fi
+
+/bin/echo "mounting dmg: $DMG_PATH" >>"$LOG_PATH"
 
 /usr/bin/hdiutil attach "$DMG_PATH" -nobrowse -quiet -mountpoint "$MOUNT_DIR" >>"$LOG_PATH" 2>&1
 SOURCE_APP="$MOUNT_DIR/Codex Switch.app"
@@ -1084,7 +1096,9 @@ if [ ! -d "$SOURCE_APP" ]; then
   exit 1
 fi
 
+/bin/echo "copying app bundle to: $TARGET_APP" >>"$LOG_PATH"
 if ! /usr/bin/ditto "$SOURCE_APP" "$TARGET_APP" >>"$LOG_PATH" 2>&1; then
+  /bin/echo "direct copy failed, retrying with administrator privileges" >>"$LOG_PATH"
   /usr/bin/osascript - "$SOURCE_APP" "$TARGET_APP" <<'APPLESCRIPT' >>"$LOG_PATH" 2>&1
 on run argv
   set sourceApp to item 1 of argv
@@ -1094,7 +1108,9 @@ end run
 APPLESCRIPT
 fi
 
+/bin/echo "relaunching app" >>"$LOG_PATH"
 /usr/bin/open -na "$TARGET_APP" >>"$LOG_PATH" 2>&1
+/bin/echo "update complete" >>"$LOG_PATH"
 `;
 }
 

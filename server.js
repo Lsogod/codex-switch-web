@@ -8,9 +8,10 @@ const { promisify } = require("util");
 
 const execFileAsync = promisify(execFile);
 const HOST = "127.0.0.1";
-const PORT = process.env.PORT || 4312;
+const PORT = Number.parseInt(process.env.PORT || "4312", 10);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
+const APP_PACKAGE_PATH = path.join(ROOT, "package.json");
 const BUNDLED_CODEX_SWITCH = path.join(ROOT, "bin", "codex-switch");
 const LOCAL_CODEX_SWITCH = path.join(os.homedir(), ".local", "bin", "codex-switch");
 const PROFILES_DIR = path.join(os.homedir(), ".codex-profiles");
@@ -47,7 +48,15 @@ const SQLITE_SESSION_DATABASES = [
 ];
 const SHARED_SESSION_ITEMS = [...SHARED_SESSION_DIRS, ...SHARED_SESSION_FILES];
 const AUTO_SWITCH_STATE_FILE = path.join(PROFILES_DIR, ".auto-switch.json");
+const UPDATE_CACHE_TTL_MS = 10 * 60 * 1000;
+const GITHUB_REPO = "Lsogod/codex-switch-web";
+const RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
+const LATEST_RELEASE_API_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
 const usageCache = new Map();
+const updateCache = {
+  expiresAt: 0,
+  value: null
+};
 const proxyEnvCache = {
   expiresAt: 0,
   value: null
@@ -61,6 +70,14 @@ const autoSwitchRuntime = {
   lastDecision: null,
   lastError: null
 };
+const APP_PACKAGE = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(APP_PACKAGE_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+})();
+const APP_VERSION = typeof APP_PACKAGE.version === "string" ? APP_PACKAGE.version : "0.0.0";
 
 function isExecutableFile(filePath) {
   try {
@@ -219,6 +236,60 @@ function extractProfileMeta(auth) {
     lastRefresh: auth?.last_refresh || null,
     usageNote
   };
+}
+
+function normalizeVersion(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^v/i, "");
+}
+
+function compareVersions(a, b) {
+  const left = normalizeVersion(a).split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const right = normalizeVersion(b).split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const delta = (left[index] || 0) - (right[index] || 0);
+    if (delta !== 0) {
+      return delta;
+    }
+  }
+  return 0;
+}
+
+function getAppBundlePath() {
+  return path.dirname(path.dirname(path.dirname(process.execPath)));
+}
+
+function isPackagedAppRuntime() {
+  return process.platform === "darwin" && getAppBundlePath().endsWith(".app");
+}
+
+function pickReleaseAsset(assets = []) {
+  if (!Array.isArray(assets) || assets.length === 0) {
+    return null;
+  }
+
+  const desiredArch = process.arch === "arm64" ? "arm64" : process.arch;
+  const lowered = assets.map((asset) => ({
+    ...asset,
+    lowerName: String(asset?.name || "").toLowerCase()
+  }));
+  const candidates = [
+    (asset) => asset.lowerName.includes(`${desiredArch}.dmg`),
+    (asset) => asset.lowerName.includes(`${desiredArch}.zip`),
+    (asset) => asset.lowerName.endsWith(".dmg"),
+    (asset) => asset.lowerName.endsWith(".zip")
+  ];
+
+  for (const matches of candidates) {
+    const found = lowered.find(matches);
+    if (found) {
+      return found;
+    }
+  }
+
+  return lowered[0] || null;
 }
 
 async function readJsonIfExists(filePath) {
@@ -807,6 +878,195 @@ async function curlJson(url, { headers = {}, timeoutMs = null } = {}) {
   }
 
   return data;
+}
+
+async function downloadFile(url, filePath, { timeoutMs = 60 * 1000 } = {}) {
+  const args = ["-L", "--fail", "--silent", "--show-error", "--output", filePath];
+  if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+    const seconds = Math.max(5, Math.ceil(timeoutMs / 1000));
+    args.push("--connect-timeout", String(Math.min(seconds, 15)), "--max-time", String(seconds));
+  }
+  args.push(url);
+
+  const proxyEnv = await readProxyEnv();
+  await execFileAsync("curl", args, {
+    maxBuffer: 1024 * 1024 * 8,
+    env: {
+      ...process.env,
+      ...proxyEnv
+    }
+  });
+}
+
+async function readLatestRelease({ forceRefresh = false } = {}) {
+  const now = Date.now();
+  if (!forceRefresh && updateCache.value && updateCache.expiresAt > now) {
+    return updateCache.value;
+  }
+
+  let value;
+  try {
+    const release = await curlJson(LATEST_RELEASE_API_URL, {
+      timeoutMs: 5 * 1000,
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "codex-switch-web"
+      }
+    });
+    const asset = pickReleaseAsset(release.assets);
+    value = {
+      ok: true,
+      checkedAt: new Date().toISOString(),
+      releaseName: release.name || release.tag_name || null,
+      releaseTag: release.tag_name || null,
+      latestVersion: normalizeVersion(release.tag_name || release.name || null),
+      releaseUrl: release.html_url || RELEASES_URL,
+      publishedAt: release.published_at || null,
+      assetName: asset?.name || null,
+      downloadUrl: asset?.browser_download_url || null
+    };
+  } catch (error) {
+    value = {
+      ok: false,
+      checkedAt: new Date().toISOString(),
+      error: error.message || "检查更新失败",
+      releaseUrl: RELEASES_URL,
+      latestVersion: null,
+      assetName: null,
+      downloadUrl: null
+    };
+  }
+
+  updateCache.value = value;
+  updateCache.expiresAt = now + UPDATE_CACHE_TTL_MS;
+  return value;
+}
+
+async function getAppVersionState({ forceRefresh = false } = {}) {
+  const release = await readLatestRelease({ forceRefresh });
+  const currentVersion = normalizeVersion(APP_VERSION);
+  const latestVersion = normalizeVersion(release.latestVersion);
+  const updateAvailable = release.ok && latestVersion && compareVersions(latestVersion, currentVersion) > 0;
+
+  return {
+    currentVersion,
+    currentVersionLabel: `v${currentVersion}`,
+    platform: process.platform,
+    arch: process.arch,
+    packaged: isPackagedAppRuntime(),
+    releasePageUrl: RELEASES_URL,
+    update: {
+      ...release,
+      latestVersion,
+      latestVersionLabel: latestVersion ? `v${latestVersion}` : null,
+      available: updateAvailable
+    }
+  };
+}
+
+function buildUpdaterScriptContent() {
+  return `#!/bin/zsh
+set -euo pipefail
+
+PARENT_PID="$1"
+DMG_PATH="$2"
+TARGET_APP="$3"
+LOG_PATH="$4"
+MOUNT_DIR="$(mktemp -d /tmp/codex-switch-update.XXXXXX)"
+
+cleanup() {
+  /usr/bin/hdiutil detach "$MOUNT_DIR" -quiet >/dev/null 2>&1 || true
+  /bin/rm -rf "$MOUNT_DIR" >/dev/null 2>&1 || true
+  /bin/rm -f "$DMG_PATH" >/dev/null 2>&1 || true
+  /bin/rm -f "$0" >/dev/null 2>&1 || true
+}
+
+trap cleanup EXIT
+
+echo "[$(/bin/date '+%Y-%m-%d %H:%M:%S')] updater start" >>"$LOG_PATH"
+/bin/sleep 1
+/bin/kill -TERM "$PARENT_PID" >/dev/null 2>&1 || true
+
+for _ in {1..120}; do
+  if ! /bin/kill -0 "$PARENT_PID" >/dev/null 2>&1; then
+    break
+  fi
+  /bin/sleep 1
+done
+
+/usr/bin/hdiutil attach "$DMG_PATH" -nobrowse -quiet -mountpoint "$MOUNT_DIR" >>"$LOG_PATH" 2>&1
+SOURCE_APP="$MOUNT_DIR/Codex Switch.app"
+if [ ! -d "$SOURCE_APP" ]; then
+  echo "missing app bundle inside dmg: $SOURCE_APP" >>"$LOG_PATH"
+  exit 1
+fi
+
+if ! /usr/bin/ditto "$SOURCE_APP" "$TARGET_APP" >>"$LOG_PATH" 2>&1; then
+  /usr/bin/osascript - "$SOURCE_APP" "$TARGET_APP" <<'APPLESCRIPT' >>"$LOG_PATH" 2>&1
+on run argv
+  set sourceApp to item 1 of argv
+  set targetApp to item 2 of argv
+  do shell script "/usr/bin/ditto " & quoted form of sourceApp & " " & quoted form of targetApp with administrator privileges
+end run
+APPLESCRIPT
+fi
+
+/usr/bin/open -na "$TARGET_APP" >>"$LOG_PATH" 2>&1
+`;
+}
+
+async function scheduleAppUpdateInstall() {
+  if (!isPackagedAppRuntime()) {
+    return {
+      ok: false,
+      message: "仅 DMG 安装版支持直接更新替换。"
+    };
+  }
+
+  const versionState = await getAppVersionState({ forceRefresh: true });
+  if (!versionState.update.ok) {
+    return {
+      ok: false,
+      message: versionState.update.error || "检查更新失败"
+    };
+  }
+
+  if (!versionState.update.available) {
+    return {
+      ok: false,
+      message: "当前已经是最新版本。"
+    };
+  }
+
+  if (!versionState.update.downloadUrl || !String(versionState.update.assetName || "").toLowerCase().endsWith(".dmg")) {
+    return {
+      ok: false,
+      message: "没有找到可直接安装的 DMG 更新包。"
+    };
+  }
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-switch-update-"));
+  const dmgPath = path.join(tmpDir, versionState.update.assetName);
+  const scriptPath = path.join(tmpDir, "apply-update.zsh");
+  const logPath = path.join(os.homedir(), "Library", "Logs", "Codex Switch Updater.log");
+
+  await downloadFile(versionState.update.downloadUrl, dmgPath, { timeoutMs: 5 * 60 * 1000 });
+  await fsp.writeFile(scriptPath, buildUpdaterScriptContent(), { mode: 0o755 });
+
+  const targetAppPath = getAppBundlePath();
+  const child = execFile("/bin/zsh", [scriptPath, String(process.pid), dmgPath, targetAppPath, logPath], {
+    detached: true,
+    stdio: "ignore"
+  });
+  child.unref();
+
+  return {
+    ok: true,
+    message: `正在安装 ${versionState.update.latestVersionLabel || versionState.update.releaseTag || "最新版本"}，应用将自动重启`,
+    targetVersion: versionState.update.latestVersion || null,
+    releaseUrl: versionState.update.releaseUrl,
+    downloadUrl: versionState.update.downloadUrl
+  };
 }
 
 async function readUsageForAuth(auth) {
@@ -2060,6 +2320,30 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (req.method === "GET" && pathname === "/api/app/version") {
+    const versionState = await getAppVersionState({ forceRefresh: false });
+    sendJson(res, 200, {
+      ok: true,
+      app: versionState
+    });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/app/update/check") {
+    const versionState = await getAppVersionState({ forceRefresh: true });
+    sendJson(res, 200, {
+      ok: true,
+      app: versionState
+    });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/app/update/install") {
+    const result = await scheduleAppUpdateInstall();
+    sendJson(res, result.ok ? 200 : 400, result);
+    return;
+  }
+
   if (req.method === "GET" && pathname === "/api/state") {
     const state = await getProfilesState();
     sendJson(res, 200, state);
@@ -2331,12 +2615,84 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-initializeAutoSwitch()
-  .catch((error) => {
-    console.error("Failed to initialize auto switch:", error);
-  })
-  .finally(() => {
-    server.listen(PORT, HOST, () => {
-      console.log(`Codex Switch Web running at http://${HOST}:${PORT}`);
+let autoSwitchInitialized = false;
+let serverStartPromise = null;
+
+async function startServer() {
+  if (server.listening) {
+    return server;
+  }
+
+  if (serverStartPromise) {
+    return serverStartPromise;
+  }
+
+  serverStartPromise = (async () => {
+    if (!autoSwitchInitialized) {
+      autoSwitchInitialized = true;
+      try {
+        await initializeAutoSwitch();
+      } catch (error) {
+        console.error("Failed to initialize auto switch:", error);
+      }
+    }
+
+    await new Promise((resolve, reject) => {
+      const handleError = (error) => {
+        server.off("listening", handleListening);
+        reject(error);
+      };
+      const handleListening = () => {
+        server.off("error", handleError);
+        resolve();
+      };
+
+      server.once("error", handleError);
+      server.once("listening", handleListening);
+      server.listen(PORT, HOST);
+    });
+
+    console.log(`Codex Switch Web running at http://${HOST}:${PORT}`);
+    return server;
+  })();
+
+  try {
+    return await serverStartPromise;
+  } catch (error) {
+    serverStartPromise = null;
+    throw error;
+  }
+}
+
+async function stopServer() {
+  if (!server.listening) {
+    serverStartPromise = null;
+    return;
+  }
+
+  await new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
     });
   });
+
+  serverStartPromise = null;
+}
+
+if (require.main === module) {
+  startServer().catch((error) => {
+    console.error("Failed to start Codex Switch Web:", error);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  HOST,
+  PORT,
+  startServer,
+  stopServer
+};

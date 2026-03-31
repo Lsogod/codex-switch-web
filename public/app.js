@@ -10,7 +10,13 @@ const activeUsageMeterBarEl = document.querySelector("#activeUsageMeterBar");
 const autoSwitchTitleEl = document.querySelector("#autoSwitchTitle");
 const autoSwitchMetaEl = document.querySelector("#autoSwitchMeta");
 const autoSwitchToggleButtonEl = document.querySelector("#autoSwitchToggleButton");
+const appVersionChipEl = document.querySelector("#appVersionChip");
+const appUpdateStatusEl = document.querySelector("#appUpdateStatus");
+const checkUpdateButtonEl = document.querySelector("#checkUpdateButton");
+const installUpdateButtonEl = document.querySelector("#installUpdateButton");
 let autoRegisterInFlight = false;
+let versionLoadInFlight = false;
+let appVersionState = null;
 const expandedProfiles = new Set();
 
 async function api(path, options = {}) {
@@ -83,6 +89,54 @@ function getUsageStatusLabel(percent) {
 
 function formatResetLabel(value) {
   return value ? `重置 ${formatTime(value)}` : "重置时间未知";
+}
+
+function renderVersionState(appState) {
+  appVersionState = appState;
+  appVersionChipEl.textContent = appState?.currentVersionLabel || "v-";
+
+  const update = appState?.update;
+  let statusText = "未检查更新";
+  if (appState?.packaged === false) {
+    statusText = "源码模式";
+  }
+  if (update?.ok === false) {
+    statusText = update.error || "检查更新失败";
+  } else if (update?.available) {
+    statusText = `发现 ${update.latestVersionLabel}`;
+  } else if (update?.latestVersion && update.latestVersion === appState?.currentVersion) {
+    statusText = "已是最新版本";
+  } else if (update?.latestVersion) {
+    statusText = `当前高于已发布版 ${update.latestVersionLabel}`;
+  }
+  appUpdateStatusEl.textContent = statusText;
+
+  const showInstall = Boolean(appState?.packaged && update?.available);
+  installUpdateButtonEl.classList.toggle("hidden", !showInstall);
+  if (showInstall) {
+    installUpdateButtonEl.textContent = `安装 ${update.latestVersionLabel}`;
+  }
+}
+
+async function loadVersionState({ force = false } = {}) {
+  if (versionLoadInFlight) return appVersionState;
+  versionLoadInFlight = true;
+  checkUpdateButtonEl.disabled = true;
+  installUpdateButtonEl.disabled = true;
+  try {
+    const result = await api(force ? "/api/app/update/check" : "/api/app/version", {
+      method: force ? "POST" : "GET"
+    });
+    renderVersionState(result.app);
+    return result.app;
+  } catch (error) {
+    appUpdateStatusEl.textContent = error.message;
+    throw error;
+  } finally {
+    versionLoadInFlight = false;
+    checkUpdateButtonEl.disabled = false;
+    installUpdateButtonEl.disabled = false;
+  }
 }
 
 function createUsageEntry(windowInfo, fallbackLabel) {
@@ -543,10 +597,43 @@ autoSwitchToggleButtonEl.addEventListener("click", async () => {
   }
 });
 
+checkUpdateButtonEl.addEventListener("click", async () => {
+  try {
+    const appState = await loadVersionState({ force: true });
+    if (appState?.update?.available) {
+      showToast(`发现 ${appState.update.latestVersionLabel}`, "success");
+    } else {
+      showToast("当前已经是最新版本", "success");
+    }
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+});
+
+installUpdateButtonEl.addEventListener("click", async () => {
+  if (!appVersionState?.update?.available) return;
+  const ok = window.confirm(`现在安装 ${appVersionState.update.latestVersionLabel} 并直接替换当前应用吗？应用会自动退出并重启。`);
+  if (!ok) return;
+  installUpdateButtonEl.disabled = true;
+  try {
+    const result = await api("/api/app/update/install", { method: "POST" });
+    appUpdateStatusEl.textContent = "正在安装更新并重启…";
+    showToast(result.message || "正在安装更新", "success");
+  } catch (error) {
+    installUpdateButtonEl.disabled = false;
+    showToast(error.message, "error");
+  }
+});
+
 loadAndMaybeAutoRegister({ silent: true }).catch((error) => {
   showToast(error.message, "error");
 });
+loadVersionState().catch(() => {});
 
 setInterval(() => {
   loadAndMaybeAutoRegister({ silent: true }).catch(() => {});
 }, 5000);
+
+setInterval(() => {
+  loadVersionState().catch(() => {});
+}, 10 * 60 * 1000);

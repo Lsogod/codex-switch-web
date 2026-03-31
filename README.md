@@ -17,9 +17,9 @@
 请直接从 GitHub Releases 下载最新安装包：
 
 - [Releases](https://github.com/Lsogod/codex-switch-web/releases)
-- [最新版本 v0.1.2](https://github.com/Lsogod/codex-switch-web/releases/tag/v0.1.2)
-- [直接下载 DMG](https://github.com/Lsogod/codex-switch-web/releases/download/v0.1.2/Codex-Switch-0.1.2-arm64.dmg)
-- [直接下载 ZIP](https://github.com/Lsogod/codex-switch-web/releases/download/v0.1.2/Codex-Switch-0.1.2-arm64.zip)
+- [最新版本 v0.1.4](https://github.com/Lsogod/codex-switch-web/releases/tag/v0.1.4)
+- [直接下载 DMG](https://github.com/Lsogod/codex-switch-web/releases/download/v0.1.4/Codex-Switch-0.1.4-arm64.dmg)
+- [直接下载 ZIP](https://github.com/Lsogod/codex-switch-web/releases/download/v0.1.4/Codex-Switch-0.1.4-arm64.zip)
 
 当前提供的文件通常有两个：
 
@@ -45,7 +45,7 @@
 如果你更习惯用命令行，可以直接执行下面这组命令：
 
 ```bash
-VERSION="0.1.2"
+VERSION="0.1.4"
 APP_NAME="Codex Switch"
 DMG_NAME="Codex-Switch-${VERSION}-arm64.dmg"
 DOWNLOAD_DIR="$HOME/Downloads/Codex-Switch"

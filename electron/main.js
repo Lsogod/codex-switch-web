@@ -1,11 +1,10 @@
 const path = require("path");
 const http = require("http");
 const fsp = require("fs/promises");
-const { spawn } = require("child_process");
 const { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog, screen, ipcMain } = require("electron");
 
 const HOST = "127.0.0.1";
-const PORT = Number.parseInt(process.env.PORT || "4312", 10);
+const PORT = app.isPackaged ? 4313 : Number.parseInt(process.env.PORT || "4312", 10);
 const BASE_URL = `http://${HOST}:${PORT}`;
 const STARTUP_ATTEMPTS = 40;
 const STARTUP_DELAY_MS = 500;
@@ -16,8 +15,6 @@ const OVERLAY_EXPANDED_SIZE = { width: 278, height: 96 };
 let tray = null;
 let dashboardWindow = null;
 let overlayWindow = null;
-let serverProcess = null;
-let serverOwnedByApp = false;
 let quitting = false;
 let overlayBoundsSaveTimer = null;
 let overlayExpanded = false;
@@ -25,6 +22,10 @@ let menuProfilesSnapshot = [];
 let menuProfilesError = null;
 let menuProfilesRefreshTimer = null;
 let menuProfilesRefreshInFlight = null;
+let bundledServerModule = null;
+let appVersionSnapshot = null;
+let appVersionError = null;
+let appVersionRefreshInFlight = null;
 let shellState = {
   overlay: {
     enabled: true,
@@ -37,33 +38,22 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function getNodeBinary() {
-  return process.env.NODE_BINARY || process.env.npm_node_execpath || "node";
-}
-
-function getServerRuntime() {
-  if (app.isPackaged) {
-    return {
-      command: process.execPath,
-      env: {
-        ...process.env,
-        ELECTRON_RUN_AS_NODE: "1",
-        PORT: String(PORT)
-      }
-    };
+function getBundledServerModule() {
+  if (bundledServerModule) {
+    return bundledServerModule;
   }
 
-  return {
-    command: getNodeBinary(),
-    env: {
-      ...process.env,
-      PORT: String(PORT)
-    }
-  };
-}
+  const serverScriptPath = path.join(app.getAppPath(), "server.js");
+  const previousPort = process.env.PORT;
+  process.env.PORT = String(PORT);
+  bundledServerModule = require(serverScriptPath);
+  if (typeof previousPort === "string") {
+    process.env.PORT = previousPort;
+  } else {
+    delete process.env.PORT;
+  }
 
-function getServerScriptPath() {
-  return path.join(app.getAppPath(), "server.js");
+  return bundledServerModule;
 }
 
 function getHealthUrl() {
@@ -248,6 +238,53 @@ function buildProfilesSubmenu() {
   });
 }
 
+function buildVersionSubmenu() {
+  const currentLabel = appVersionSnapshot?.currentVersionLabel || `v${app.getVersion()}`;
+  const items = [
+    {
+      label: `当前版本 ${currentLabel}`,
+      enabled: false
+    },
+    {
+      label: "检查更新",
+      click: () => {
+        checkForUpdatesFromMenu().catch((error) => {
+          dialog.showErrorBox("Codex Switch", error.message);
+        });
+      }
+    }
+  ];
+
+  if (appVersionError) {
+    items.push({
+      label: "更新检查失败",
+      sublabel: appVersionError,
+      enabled: false
+    });
+    return items;
+  }
+
+  if (appVersionSnapshot?.update?.available) {
+    items.push({
+      label: `安装 ${appVersionSnapshot.update.latestVersionLabel}`,
+      sublabel: appVersionSnapshot.update.assetName || "下载并替换当前安装",
+      click: () => {
+        installUpdateFromMenu().catch((error) => {
+          dialog.showErrorBox("Codex Switch", error.message);
+        });
+      }
+    });
+  } else if (appVersionSnapshot?.update?.ok) {
+    items.push({
+      label: "已是最新版本",
+      sublabel: appVersionSnapshot.update.latestVersionLabel || "暂无可安装更新",
+      enabled: false
+    });
+  }
+
+  return items;
+}
+
 function buildContextMenu() {
   return Menu.buildFromTemplate([
     {
@@ -261,6 +298,10 @@ function buildContextMenu() {
           dialog.showErrorBox("Codex Switch Menubar", error.message);
         });
       }
+    },
+    {
+      label: "版本与更新",
+      submenu: buildVersionSubmenu()
     },
     {
       label: "账号列表",
@@ -449,18 +490,12 @@ async function ensureServerRunning() {
     return;
   }
 
-  const runtime = getServerRuntime();
-  serverProcess = spawn(runtime.command, [getServerScriptPath()], {
-    cwd: app.getAppPath(),
-    env: runtime.env,
-    stdio: "ignore"
-  });
-  serverOwnedByApp = true;
+  const serverModule = getBundledServerModule();
+  if (typeof serverModule?.startServer !== "function") {
+    throw new Error(`Menu bar app could not load bundled server from ${app.getAppPath()}`);
+  }
 
-  serverProcess.on("exit", () => {
-    serverProcess = null;
-    serverOwnedByApp = false;
-  });
+  await serverModule.startServer();
 
   for (let attempt = 0; attempt < STARTUP_ATTEMPTS; attempt += 1) {
     if (await isServerReachable()) {
@@ -534,6 +569,91 @@ async function updateMenuProfilesSnapshot() {
   return menuProfilesRefreshInFlight;
 }
 
+async function updateAppVersionSnapshot({ forceRefresh = false } = {}) {
+  if (appVersionRefreshInFlight) {
+    return appVersionRefreshInFlight;
+  }
+
+  appVersionRefreshInFlight = (async () => {
+    try {
+      const result = forceRefresh
+        ? await postLocalJson("/api/app/update/check")
+        : await getLocalJson("/api/app/version");
+      appVersionSnapshot = result?.app || null;
+      appVersionError = null;
+    } catch (error) {
+      appVersionSnapshot = null;
+      appVersionError = error.message || "未知错误";
+    } finally {
+      appVersionRefreshInFlight = null;
+    }
+    return appVersionSnapshot;
+  })();
+
+  return appVersionRefreshInFlight;
+}
+
+async function checkForUpdatesFromMenu() {
+  const snapshot = await updateAppVersionSnapshot({ forceRefresh: true });
+  refreshTrayMenu();
+
+  if (!snapshot?.update?.ok) {
+    throw new Error(snapshot?.update?.error || appVersionError || "检查更新失败");
+  }
+
+  if (snapshot.update.available) {
+    await dialog.showMessageBox({
+      type: "info",
+      buttons: ["知道了"],
+      message: `发现新版本 ${snapshot.update.latestVersionLabel}`,
+      detail: snapshot.update.assetName || "可直接下载安装更新"
+    });
+    return;
+  }
+
+  await dialog.showMessageBox({
+    type: "info",
+    buttons: ["知道了"],
+    message: `当前已是最新版本 ${snapshot.currentVersionLabel}`
+  });
+}
+
+async function installUpdateFromMenu() {
+  const snapshot = await updateAppVersionSnapshot({ forceRefresh: true });
+  refreshTrayMenu();
+
+  if (!snapshot?.update?.ok) {
+    throw new Error(snapshot?.update?.error || appVersionError || "检查更新失败");
+  }
+
+  if (!snapshot.update.available) {
+    await dialog.showMessageBox({
+      type: "info",
+      buttons: ["知道了"],
+      message: `当前已是最新版本 ${snapshot.currentVersionLabel}`
+    });
+    return;
+  }
+
+  const confirmation = await dialog.showMessageBox({
+    type: "question",
+    buttons: ["安装更新", "取消"],
+    defaultId: 0,
+    cancelId: 1,
+    message: `安装 ${snapshot.update.latestVersionLabel}`,
+    detail: "将下载最新 DMG，退出当前应用，替换 /Applications 中的安装并自动重启。"
+  });
+
+  if (confirmation.response !== 0) {
+    return;
+  }
+
+  const result = await postLocalJson("/api/app/update/install", {});
+  if (!result?.ok) {
+    throw new Error(result?.message || result?.error || "安装更新失败");
+  }
+}
+
 function triggerMenuProfilesRefresh() {
   updateMenuProfilesSnapshot()
     .then(() => {
@@ -563,7 +683,7 @@ async function switchToProfileFromMenu(profileName) {
   const result = await postLocalJson("/api/profile/use", {
     name: profileName,
     closeAndForce: true,
-    openCodex: false
+    openCodex: true
   });
 
   if (!result?.ok) {
@@ -728,19 +848,13 @@ async function setOverlayExpanded(expanded) {
 
 function cleanupServerProcess() {
   stopMenuProfilesRefreshLoop();
-  if (!serverOwnedByApp || !serverProcess || serverProcess.killed) {
-    return;
-  }
-
-  try {
-    serverProcess.kill("SIGTERM");
-  } catch {}
 }
 
 async function bootstrap() {
   await ensureServerRunning();
   await loadShellState();
   await updateMenuProfilesSnapshot();
+  await updateAppVersionSnapshot({ forceRefresh: false });
   startMenuProfilesRefreshLoop();
 
   app.setName("Codex Switch");

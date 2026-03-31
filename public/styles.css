@@ -119,6 +119,33 @@ body {
   color: rgba(255, 255, 255, 0.72);
 }
 
+.topbar-release {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.version-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: #fff;
+}
+
+.topbar-release-status {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.78);
+}
+
 .topbar-badge {
   padding: 4px 9px;
   border-radius: 999px;
@@ -380,6 +407,13 @@ body {
   padding: 6px 11px;
   font-size: 12px;
   border-radius: 9px;
+}
+
+.btn-xs {
+  min-height: 28px;
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: 999px;
 }
 
 .btn:disabled {

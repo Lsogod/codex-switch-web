@@ -143,11 +143,16 @@ function renderVersionState(appState) {
   appVersionChipEl.textContent = appState?.currentVersionLabel || "v-";
 
   const update = appState?.update;
+  const install = appState?.install;
   let statusText = "未检查更新";
   if (appState?.packaged === false) {
     statusText = "源码模式";
   }
-  if (update?.ok === false) {
+  if (install?.inFlight) {
+    statusText = install.message || "正在后台安装更新";
+  } else if (install?.phase === "failed" && install?.error) {
+    statusText = install.error;
+  } else if (update?.ok === false) {
     statusText = update.error || "检查更新失败";
   } else if (update?.available) {
     statusText = `发现 ${update.latestVersionLabel}`;
@@ -158,11 +163,12 @@ function renderVersionState(appState) {
   }
   appUpdateStatusEl.textContent = statusText;
 
-  const showInstall = Boolean(appState?.packaged && update?.available);
+  const showInstall = Boolean(appState?.packaged && update?.available && !install?.inFlight);
   installUpdateButtonEl.classList.toggle("hidden", !showInstall);
   if (showInstall) {
     installUpdateButtonEl.textContent = `安装 ${update.latestVersionLabel}`;
   }
+  installUpdateButtonEl.disabled = Boolean(install?.inFlight);
 }
 
 async function loadVersionState({ force = false } = {}) {
@@ -689,7 +695,14 @@ installUpdateButtonEl.addEventListener("click", async () => {
   installUpdateButtonEl.disabled = true;
   try {
     const result = await api("/api/app/update/install", { method: "POST" });
-    appUpdateStatusEl.textContent = "正在安装更新并重启…";
+    if (result.install) {
+      renderVersionState({
+        ...appVersionState,
+        install: result.install
+      });
+    } else {
+      appUpdateStatusEl.textContent = "正在后台安装更新…";
+    }
     showToast(result.message || "正在安装更新", "success");
   } catch (error) {
     installUpdateButtonEl.disabled = false;

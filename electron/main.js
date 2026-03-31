@@ -292,7 +292,19 @@ function buildVersionSubmenu() {
     return items;
   }
 
-  if (appVersionSnapshot?.update?.available) {
+  if (appVersionSnapshot?.install?.inFlight) {
+    items.push({
+      label: "正在安装更新",
+      sublabel: appVersionSnapshot.install.message || "后台下载并替换当前应用",
+      enabled: false
+    });
+  } else if (appVersionSnapshot?.install?.phase === "failed" && appVersionSnapshot?.install?.error) {
+    items.push({
+      label: "更新失败",
+      sublabel: appVersionSnapshot.install.error,
+      enabled: false
+    });
+  } else if (appVersionSnapshot?.update?.available) {
     items.push({
       label: `安装 ${appVersionSnapshot.update.latestVersionLabel}`,
       sublabel: appVersionSnapshot.update.assetName || "下载并替换当前安装",
@@ -644,7 +656,8 @@ function syncOverlayUpdateNotice() {
   const shouldShow = Boolean(
     shellState.autoUpdateChecks.enabled &&
     appVersionSnapshot?.packaged &&
-    appVersionSnapshot?.update?.available
+    appVersionSnapshot?.update?.available &&
+    !appVersionSnapshot?.install?.inFlight
   );
   if (shouldShow === overlayHasUpdateNotice) {
     return;
@@ -696,6 +709,16 @@ async function installUpdateFromMenu() {
     return;
   }
 
+  if (snapshot.install?.inFlight) {
+    await dialog.showMessageBox({
+      type: "info",
+      buttons: ["知道了"],
+      message: "更新已经在后台进行中",
+      detail: snapshot.install.message || "请等待下载和安装完成"
+    });
+    return;
+  }
+
   const confirmation = await dialog.showMessageBox({
     type: "question",
     buttons: ["安装更新", "取消"],
@@ -713,6 +736,9 @@ async function installUpdateFromMenu() {
   if (!result?.ok) {
     throw new Error(result?.message || result?.error || "安装更新失败");
   }
+  await updateAppVersionSnapshot({ forceRefresh: false });
+  syncOverlayUpdateNotice();
+  refreshTrayMenu();
 }
 
 function triggerAppVersionRefresh({ forceRefresh = false } = {}) {

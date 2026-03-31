@@ -50,6 +50,7 @@ const SQLITE_SESSION_DATABASES = [
 const SHARED_SESSION_ITEMS = [...SHARED_SESSION_DIRS, ...SHARED_SESSION_FILES];
 const AUTO_SWITCH_STATE_FILE = path.join(PROFILES_DIR, ".auto-switch.json");
 const UPDATE_CACHE_TTL_MS = 10 * 60 * 1000;
+const APP_UPDATE_DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000;
 const GITHUB_REPO = "Lsogod/codex-switch-web";
 const RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
 const LATEST_RELEASE_API_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
@@ -63,6 +64,19 @@ const updateCache = {
 const proxyEnvCache = {
   expiresAt: 0,
   value: null
+};
+const appUpdateRuntime = {
+  inFlight: false,
+  phase: "idle",
+  message: null,
+  error: null,
+  startedAt: null,
+  targetVersion: null,
+  releaseUrl: null,
+  downloadUrl: null,
+  assetName: null,
+  logPath: path.join(os.homedir(), "Library", "Logs", "Codex Switch Updater.log"),
+  task: null
 };
 const autoSwitchRuntime = {
   enabled: false,
@@ -981,6 +995,28 @@ async function downloadFile(url, filePath, { timeoutMs = 60 * 1000 } = {}) {
   });
 }
 
+async function appendUpdaterLogLine(line) {
+  try {
+    await ensureParentDir(appUpdateRuntime.logPath);
+    await fsp.appendFile(appUpdateRuntime.logPath, `[${new Date().toISOString()}] ${line}\n`, "utf8");
+  } catch {}
+}
+
+function getAppUpdateInstallState() {
+  return {
+    inFlight: appUpdateRuntime.inFlight,
+    phase: appUpdateRuntime.phase,
+    message: appUpdateRuntime.message,
+    error: appUpdateRuntime.error,
+    startedAt: appUpdateRuntime.startedAt,
+    targetVersion: appUpdateRuntime.targetVersion,
+    releaseUrl: appUpdateRuntime.releaseUrl,
+    downloadUrl: appUpdateRuntime.downloadUrl,
+    assetName: appUpdateRuntime.assetName,
+    logPath: appUpdateRuntime.logPath
+  };
+}
+
 async function readLatestRelease({ forceRefresh = false } = {}) {
   const now = Date.now();
   if (!forceRefresh && updateCache.value && updateCache.expiresAt > now) {
@@ -1043,7 +1079,8 @@ async function getAppVersionState({ forceRefresh = false } = {}) {
       latestVersion,
       latestVersionLabel: latestVersion ? `v${latestVersion}` : null,
       available: updateAvailable
-    }
+    },
+    install: getAppUpdateInstallState()
   };
 }
 
@@ -1115,6 +1152,15 @@ fi
 }
 
 async function scheduleAppUpdateInstall() {
+  if (appUpdateRuntime.inFlight) {
+    return {
+      ok: true,
+      alreadyInProgress: true,
+      message: appUpdateRuntime.message || "更新已经在后台进行中",
+      install: getAppUpdateInstallState()
+    };
+  }
+
   if (!isPackagedAppRuntime()) {
     return {
       ok: false,
@@ -1147,24 +1193,55 @@ async function scheduleAppUpdateInstall() {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-switch-update-"));
   const dmgPath = path.join(tmpDir, versionState.update.assetName);
   const scriptPath = path.join(tmpDir, "apply-update.zsh");
-  const logPath = path.join(os.homedir(), "Library", "Logs", "Codex Switch Updater.log");
+  const logPath = appUpdateRuntime.logPath;
 
-  await downloadFile(versionState.update.downloadUrl, dmgPath, { timeoutMs: 5 * 60 * 1000 });
-  await fsp.writeFile(scriptPath, buildUpdaterScriptContent(), { mode: 0o755 });
+  appUpdateRuntime.inFlight = true;
+  appUpdateRuntime.phase = "downloading";
+  appUpdateRuntime.message = `正在后台下载 ${versionState.update.latestVersionLabel || "更新包"}`;
+  appUpdateRuntime.error = null;
+  appUpdateRuntime.startedAt = new Date().toISOString();
+  appUpdateRuntime.targetVersion = versionState.update.latestVersion || null;
+  appUpdateRuntime.releaseUrl = versionState.update.releaseUrl || null;
+  appUpdateRuntime.downloadUrl = versionState.update.downloadUrl || null;
+  appUpdateRuntime.assetName = versionState.update.assetName || null;
 
-  const targetAppPath = getAppBundlePath();
-  const child = execFile("/bin/zsh", [scriptPath, String(process.pid), dmgPath, targetAppPath, logPath], {
-    detached: true,
-    stdio: "ignore"
-  });
-  child.unref();
+  appUpdateRuntime.task = (async () => {
+    try {
+      await appendUpdaterLogLine(`background download start: ${versionState.update.assetName}`);
+      await downloadFile(versionState.update.downloadUrl, dmgPath, { timeoutMs: APP_UPDATE_DOWNLOAD_TIMEOUT_MS });
+      await appendUpdaterLogLine(`background download complete: ${dmgPath}`);
+      await fsp.writeFile(scriptPath, buildUpdaterScriptContent(), { mode: 0o755 });
+
+      appUpdateRuntime.phase = "installing";
+      appUpdateRuntime.message = `已下载 ${versionState.update.latestVersionLabel || "更新包"}，正在替换应用`;
+
+      const targetAppPath = getAppBundlePath();
+      const child = execFile("/bin/zsh", [scriptPath, String(process.pid), dmgPath, targetAppPath, logPath], {
+        detached: true,
+        stdio: "ignore"
+      });
+      child.unref();
+
+      appUpdateRuntime.phase = "restarting";
+      appUpdateRuntime.message = `正在安装 ${versionState.update.latestVersionLabel || "更新"} 并重启应用`;
+    } catch (error) {
+      appUpdateRuntime.inFlight = false;
+      appUpdateRuntime.phase = "failed";
+      appUpdateRuntime.error = error.message || "下载安装更新失败";
+      appUpdateRuntime.message = appUpdateRuntime.error;
+      appUpdateRuntime.task = null;
+      await appendUpdaterLogLine(`background update failed: ${appUpdateRuntime.error}`);
+      await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+  })();
 
   return {
     ok: true,
-    message: `正在安装 ${versionState.update.latestVersionLabel || versionState.update.releaseTag || "最新版本"}，应用将自动重启`,
+    message: `已开始后台下载安装 ${versionState.update.latestVersionLabel || versionState.update.releaseTag || "最新版本"}，完成后会自动重启`,
     targetVersion: versionState.update.latestVersion || null,
     releaseUrl: versionState.update.releaseUrl,
-    downloadUrl: versionState.update.downloadUrl
+    downloadUrl: versionState.update.downloadUrl,
+    install: getAppUpdateInstallState()
   };
 }
 

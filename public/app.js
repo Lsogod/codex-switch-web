@@ -14,13 +14,22 @@ const appVersionChipEl = document.querySelector("#appVersionChip");
 const appUpdateStatusEl = document.querySelector("#appUpdateStatus");
 const checkUpdateButtonEl = document.querySelector("#checkUpdateButton");
 const installUpdateButtonEl = document.querySelector("#installUpdateButton");
+const rebuildSidebarButtonEl = document.querySelector("#rebuildSidebarButton");
 const usageNoticeEl = document.querySelector("#usageNotice");
 const usageNoticeTextEl = document.querySelector("#usageNoticeText");
 const usageNoticeCloseEl = document.querySelector("#usageNoticeClose");
+const sessionsSummaryEl = document.querySelector("#sessionsSummary");
+const sessionProjectsListEl = document.querySelector("#sessionProjectsList");
+const refreshSessionsButtonEl = document.querySelector("#refreshSessionsButton");
+const sessionSearchInputEl = document.querySelector("#sessionSearchInput");
 let autoRegisterInFlight = false;
 let versionLoadInFlight = false;
 let appVersionState = null;
+let sessionsLoadInFlight = false;
+let sessionBrowserState = null;
+let lastSeenActiveProfile = null;
 const expandedProfiles = new Set();
+const expandedSessionProjects = new Set();
 const usageRenderCache = new Map();
 let dismissedUsageNoticeKey = null;
 
@@ -538,6 +547,386 @@ function renderProfiles(profiles) {
   }
 }
 
+function getSessionProjectKey(project) {
+  return project.workspaceRoot || project.label || "unknown";
+}
+
+function normalizeComparablePath(value) {
+  return typeof value === "string" ? value.trim().replace(/\/+$/, "") : "";
+}
+
+function getProjectDesktopState(project) {
+  const sessions = Array.isArray(project?.sessions) ? project.sessions : [];
+  const latestSession = sessions.reduce((latest, session) => {
+    if (!latest) {
+      return session;
+    }
+    return String(session?.updatedAt || "").localeCompare(String(latest?.updatedAt || "")) > 0
+      ? session
+      : latest;
+  }, null);
+
+  const workspaceRoot = normalizeComparablePath(project?.workspaceRoot || "");
+  const latestSessionCwd = normalizeComparablePath(latestSession?.cwd || "");
+  const latestSessionInSubdir = Boolean(
+    workspaceRoot &&
+    latestSessionCwd &&
+    latestSessionCwd !== workspaceRoot &&
+    latestSessionCwd.startsWith(`${workspaceRoot}/`)
+  );
+  const latestSessionRootMismatch = Boolean(
+    workspaceRoot &&
+    latestSessionCwd &&
+    latestSessionCwd !== workspaceRoot
+  );
+
+  return {
+    latestSession,
+    latestSessionCwd,
+    latestSessionInSubdir,
+    latestSessionRootMismatch
+  };
+}
+
+function matchesSessionQuery(project, session, query) {
+  if (!query) return true;
+  const haystack = [
+    project.label,
+    project.workspaceRoot,
+    session.title,
+    session.cwd,
+    session.id,
+    session.rolloutPath
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .toLowerCase();
+  return haystack.includes(query);
+}
+
+function summarizeSessions(sessions) {
+  return (Array.isArray(sessions) ? sessions : []).reduce((summary, session) => {
+    summary.totalCount += 1;
+    if (session?.sidebarSeeded) {
+      summary.recentCount += 1;
+    } else {
+      summary.outsideRecentCount += 1;
+    }
+    return summary;
+  }, {
+    totalCount: 0,
+    recentCount: 0,
+    outsideRecentCount: 0
+  });
+}
+
+function buildSessionRow(session, projectDesktopState) {
+  const isRecent = Boolean(session?.sidebarSeeded);
+  const row = document.createElement("article");
+  row.className = `session-row ${isRecent ? "session-row-visible" : "session-row-hidden"}`;
+
+  const main = document.createElement("div");
+  main.className = "session-row-main";
+
+  const rowTitle = document.createElement("strong");
+  rowTitle.className = "session-row-title";
+  rowTitle.textContent = session.title || `会话 ${session.id}`;
+  main.appendChild(rowTitle);
+
+  const rowMeta = document.createElement("div");
+  rowMeta.className = "session-row-meta";
+  rowMeta.textContent = [
+    formatTime(session.updatedAt),
+    formatShortPath(session.cwd || session.workspaceRoot || ""),
+    `来源 ${session.source || "未知"}`,
+    session.sidebarSeeded ? "共享库前100" : "共享库100外",
+    session.model ? `${session.modelProvider || "model"}:${session.model}` : null,
+    projectDesktopState?.latestSessionInSubdir
+      ? "桌面端可能归组异常（最新线程在子目录）"
+      : projectDesktopState?.latestSessionRootMismatch
+        ? "桌面端可能归组异常（最新线程路径与项目根不一致）"
+        : null
+  ].filter(Boolean).join(" · ");
+  main.appendChild(rowMeta);
+
+  const rowId = document.createElement("code");
+  rowId.className = "session-row-id";
+  rowId.textContent = session.id;
+  main.appendChild(rowId);
+  row.appendChild(main);
+
+  const actions = document.createElement("div");
+  actions.className = "session-row-actions";
+
+  const resumeButton = document.createElement("button");
+  resumeButton.className = "btn btn-sm btn-primary";
+  resumeButton.type = "button";
+  resumeButton.textContent = "继续会话";
+  resumeButton.addEventListener("click", async () => {
+    resumeButton.disabled = true;
+    try {
+      const result = await api("/api/session/resume", {
+        method: "POST",
+        body: { id: session.id }
+      });
+      showToast(result.message || "已在 Terminal 打开会话", "success");
+    } catch (error) {
+      showToast(error.message, "error");
+    } finally {
+      resumeButton.disabled = false;
+    }
+  });
+  actions.appendChild(resumeButton);
+
+  const revealButton = document.createElement("button");
+  revealButton.className = "btn btn-sm btn-secondary";
+  revealButton.type = "button";
+  revealButton.textContent = "定位文件";
+  revealButton.addEventListener("click", async () => {
+    revealButton.disabled = true;
+    try {
+      const result = await api("/api/session/reveal", {
+        method: "POST",
+        body: { id: session.id }
+      });
+      showToast(result.message || "已打开本地路径", "success");
+    } catch (error) {
+      showToast(error.message, "error");
+    } finally {
+      revealButton.disabled = false;
+    }
+  });
+  actions.appendChild(revealButton);
+
+  const deleteButton = document.createElement("button");
+  deleteButton.className = "btn btn-sm btn-delete";
+  deleteButton.type = "button";
+  deleteButton.textContent = "物理删除";
+  deleteButton.addEventListener("click", async () => {
+    const confirmed = window.confirm(
+      `确定物理删除这个 session 吗？\n\n${session.title || `会话 ${session.id}`}\n${session.id}\n\n会删除数据库记录与本地会话文件，且不可恢复。`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    resumeButton.disabled = true;
+    revealButton.disabled = true;
+    deleteButton.disabled = true;
+    try {
+      const result = await api("/api/session/delete", {
+        method: "POST",
+        body: { id: session.id }
+      });
+      showToast(result.message || "已物理删除会话", "success");
+      await loadSessionBrowser();
+    } catch (error) {
+      showToast(error.message, "error");
+      resumeButton.disabled = false;
+      revealButton.disabled = false;
+      deleteButton.disabled = false;
+    }
+  });
+  actions.appendChild(deleteButton);
+
+  row.appendChild(actions);
+  return row;
+}
+
+function renderSessionProjects(browser) {
+  if (!sessionProjectsListEl || !sessionsSummaryEl) {
+    return;
+  }
+
+  sessionProjectsListEl.innerHTML = "";
+
+  const allProjects = Array.isArray(browser?.projects) ? browser.projects : [];
+  const analyzedProjects = allProjects.map((project) => ({
+    ...project,
+    projectDesktopState: getProjectDesktopState(project)
+  }));
+  const allSessions = analyzedProjects.flatMap((project) => Array.isArray(project.sessions) ? project.sessions : []);
+  const overallSummary = summarizeSessions(allSessions);
+  const overallRiskyProjectCount = analyzedProjects.filter(
+    (project) => project.projectDesktopState?.latestSessionRootMismatch
+  ).length;
+  const query = (sessionSearchInputEl?.value || "").trim().toLowerCase();
+  const projects = analyzedProjects
+    .map((project) => ({
+      ...project,
+      sessionSummary: summarizeSessions(project.sessions),
+      sessions: Array.isArray(project.sessions)
+        ? project.sessions.filter((session) => matchesSessionQuery(project, session, query))
+        : []
+    }))
+    .filter((project) => project.sessions.length > 0);
+
+  const totalRenderedSessions = projects.reduce((sum, project) => sum + project.sessions.length, 0);
+  if (browser?.summary) {
+    const parts = [
+      `全部 ${browser.summary.totalSessions} 个 session`,
+      `项目 ${browser.summary.totalProjects} 个`,
+      `共享库前100 ${Math.min(browser.summary.totalSessions, browser.summary.sidebarWindowSize)} 条`,
+      `共享库100外 ${overallSummary.outsideRecentCount} 条`,
+      `最新线程子目录异常 ${overallRiskyProjectCount} 个项目`,
+      "下方按项目列出全部会话"
+    ];
+    if (query) {
+      parts.push(`筛出 ${projects.length} 个项目 / ${totalRenderedSessions} 条会话`);
+    }
+    sessionsSummaryEl.textContent = parts.join(" · ");
+  } else {
+    sessionsSummaryEl.textContent = query
+      ? `筛出 ${projects.length} 个项目 / ${totalRenderedSessions} 条会话`
+      : "暂无会话数据";
+  }
+
+  if (!projects.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = query ? "没有匹配到会话。" : "还没有可展示的会话。";
+    sessionProjectsListEl.appendChild(empty);
+    return;
+  }
+
+  for (const project of projects) {
+    const projectKey = getSessionProjectKey(project);
+    const details = document.createElement("details");
+    details.className = "session-project";
+    details.open = expandedSessionProjects.has(projectKey) || (!query && project.sessionSummary.recentCount > 0);
+    details.addEventListener("toggle", () => {
+      if (details.open) {
+        expandedSessionProjects.add(projectKey);
+      } else {
+        expandedSessionProjects.delete(projectKey);
+      }
+    });
+
+    const summary = document.createElement("summary");
+    summary.className = "session-project-summary";
+
+    const heading = document.createElement("div");
+    heading.className = "session-project-heading";
+    const title = document.createElement("strong");
+    title.className = "session-project-title";
+    title.textContent = project.label || "未分组";
+    heading.appendChild(title);
+    const pathMeta = document.createElement("span");
+    pathMeta.className = "session-project-path muted";
+    pathMeta.textContent = formatShortPath(project.workspaceRoot || "");
+    heading.appendChild(pathMeta);
+    summary.appendChild(heading);
+
+    const badges = document.createElement("div");
+    badges.className = "session-project-badges";
+    for (const text of [
+      `全部 ${project.sessionSummary.totalCount}`,
+      `共享前100 ${project.sessionSummary.recentCount}`,
+      `共享100外 ${project.sessionSummary.outsideRecentCount}`,
+      project.projectDesktopState?.latestSessionInSubdir
+        ? "最新线程在子目录"
+        : project.projectDesktopState?.latestSessionRootMismatch
+          ? "最新线程路径异常"
+          : "最新线程在项目根"
+    ]) {
+      const badge = document.createElement("span");
+      badge.className = "session-badge";
+      badge.textContent = text;
+      badges.appendChild(badge);
+    }
+    summary.appendChild(badges);
+    details.appendChild(summary);
+
+    const list = document.createElement("div");
+    list.className = "session-list";
+
+    if (project.projectDesktopState?.latestSessionRootMismatch) {
+      const risk = document.createElement("section");
+      risk.className = "session-subgroup";
+
+      const riskHead = document.createElement("div");
+      riskHead.className = "session-subgroup-head";
+      riskHead.dataset.tone = "hidden";
+
+      const riskTitle = document.createElement("strong");
+      riskTitle.className = "session-subgroup-title";
+      riskTitle.textContent = "桌面端归组异常风险";
+      riskHead.appendChild(riskTitle);
+      risk.appendChild(riskHead);
+
+      const riskBody = document.createElement("p");
+      riskBody.className = "muted";
+      riskBody.textContent = project.projectDesktopState.latestSessionInSubdir
+        ? `这个项目最新线程的 cwd 是 ${formatShortPath(project.projectDesktopState.latestSessionCwd)}，位于项目根子目录内，不是项目根 ${formatShortPath(project.workspaceRoot || "")}。这类项目在 Codex App 里可能出现项目行存在，但组内显示 No threads。`
+        : `这个项目最新线程的 cwd 是 ${formatShortPath(project.projectDesktopState.latestSessionCwd)}，与项目根 ${formatShortPath(project.workspaceRoot || "")} 不一致。Codex App 可能因此出现归组异常。`;
+      risk.appendChild(riskBody);
+      list.appendChild(risk);
+    }
+
+    const sessionGroups = [
+      {
+        tone: "visible",
+        title: `共享库前100 (${project.sessionSummary.recentCount})`,
+        sessions: project.sessions.filter((session) => session.sidebarSeeded)
+      },
+      {
+        tone: "hidden",
+        title: `共享库100外 (${project.sessionSummary.outsideRecentCount})`,
+        sessions: project.sessions.filter((session) => !session.sidebarSeeded)
+      }
+    ].filter((group) => group.sessions.length > 0);
+
+    for (const group of sessionGroups) {
+      const section = document.createElement("section");
+      section.className = "session-subgroup";
+
+      const sectionHead = document.createElement("div");
+      sectionHead.className = "session-subgroup-head";
+      sectionHead.dataset.tone = group.tone;
+
+      const sectionTitle = document.createElement("strong");
+      sectionTitle.className = "session-subgroup-title";
+      sectionTitle.textContent = group.title;
+      sectionHead.appendChild(sectionTitle);
+      section.appendChild(sectionHead);
+
+      for (const session of group.sessions) {
+        section.appendChild(buildSessionRow(session, project.projectDesktopState));
+      }
+
+      list.appendChild(section);
+    }
+
+    details.appendChild(list);
+    sessionProjectsListEl.appendChild(details);
+  }
+}
+
+async function loadSessionBrowser() {
+  if (!sessionProjectsListEl) return null;
+  if (sessionsLoadInFlight) return sessionBrowserState;
+  sessionsLoadInFlight = true;
+  if (refreshSessionsButtonEl) {
+    refreshSessionsButtonEl.disabled = true;
+  }
+  try {
+    const browser = await api("/api/sessions");
+    sessionBrowserState = browser;
+    renderSessionProjects(browser);
+    return browser;
+  } catch (error) {
+    if (sessionsSummaryEl) {
+      sessionsSummaryEl.textContent = error.message;
+    }
+    throw error;
+  } finally {
+    sessionsLoadInFlight = false;
+    if (refreshSessionsButtonEl) {
+      refreshSessionsButtonEl.disabled = false;
+    }
+  }
+}
+
 async function ensureCodexReady(actionLabel) {
   const processState = await api("/api/codex/processes");
   if (!processState.hasBlockingProcesses) return true;
@@ -563,6 +952,8 @@ async function ensureCodexReady(actionLabel) {
 
 async function loadState() {
   const state = await api("/api/state");
+  const activeProfileChanged = lastSeenActiveProfile != null && lastSeenActiveProfile !== state.activeProfile;
+  lastSeenActiveProfile = state.activeProfile || "";
   activeProfileEl.textContent = state.activeProfile;
   activeProfileEl.title = state.activeProfile || "";
   profilesDirEl.textContent = formatShortPath(state.profilesDir);
@@ -580,6 +971,9 @@ async function loadState() {
 
   renderAutoSwitch(state.autoSwitch);
   renderProfiles(state.profiles);
+  if (activeProfileChanged) {
+    await loadSessionBrowser().catch(() => {});
+  }
   return state;
 }
 
@@ -612,12 +1006,43 @@ async function loadAndMaybeAutoRegister({ silent = false, allowAutoRegister = tr
   if (allowAutoRegister) await maybeAutoRegister(state, { silent });
 }
 
+refreshSessionsButtonEl?.addEventListener("click", async () => {
+  try {
+    await loadSessionBrowser();
+    showToast("会话列表已刷新", "success");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+});
+
+sessionSearchInputEl?.addEventListener("input", () => {
+  renderSessionProjects(sessionBrowserState);
+});
+
 document.querySelector("#openCodexButton").addEventListener("click", async () => {
   try {
     const result = await api("/api/open/codex", { method: "POST" });
     showToast(result.ok ? "已打开 Codex" : "打开 Codex 失败", result.ok ? "success" : "error");
   } catch (error) {
     showToast(error.message, "error");
+  }
+});
+
+rebuildSidebarButtonEl?.addEventListener("click", async () => {
+  const ok = window.confirm("这会关闭并重新打开 Codex，同时清理桌面端本地侧边栏缓存。确定继续吗？");
+  if (!ok) return;
+
+  rebuildSidebarButtonEl.disabled = true;
+  try {
+    showToast("正在重建 Codex 侧边栏...", "info");
+    const result = await api("/api/codex/rebuild-sidebar", { method: "POST" });
+    showToast(result.message || "Codex 侧边栏已重建", "success");
+    await loadAndMaybeAutoRegister({ silent: true, allowAutoRegister: false });
+    await loadSessionBrowser().catch(() => {});
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    rebuildSidebarButtonEl.disabled = false;
   }
 });
 
@@ -718,11 +1143,16 @@ usageNoticeCloseEl.addEventListener("click", () => {
 loadAndMaybeAutoRegister({ silent: true }).catch((error) => {
   showToast(error.message, "error");
 });
+loadSessionBrowser().catch(() => {});
 loadVersionState().catch(() => {});
 
 setInterval(() => {
   loadAndMaybeAutoRegister({ silent: true }).catch(() => {});
 }, 5000);
+
+setInterval(() => {
+  loadSessionBrowser().catch(() => {});
+}, 60 * 1000);
 
 setInterval(() => {
   loadVersionState().catch(() => {});

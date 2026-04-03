@@ -18,6 +18,13 @@ const PROFILES_DIR = path.join(os.homedir(), ".codex-profiles");
 const ACTIVE_CODEX_DIR = path.join(os.homedir(), ".codex");
 const SHARED_SESSIONS_DIR = path.join(PROFILES_DIR, ".shared-sessions");
 const SHARED_GLOBAL_STATE_PATH = path.join(PROFILES_DIR, ".shared-global-state.json");
+const CODEX_APP_SUPPORT_DIR = path.join(os.homedir(), "Library", "Application Support", "Codex");
+const CODEX_CACHE_RESET_ITEMS = [
+  "Local Storage",
+  "Session Storage",
+  "Cache",
+  "Code Cache"
+];
 const PROCESS_POLL_ATTEMPTS = 12;
 const PROCESS_POLL_DELAY_MS = 500;
 const PROFILE_POLL_ATTEMPTS = 12;
@@ -29,6 +36,11 @@ const AUTO_SWITCH_POLL_MS = 15 * 1000;
 const AUTO_SWITCH_COOLDOWN_MS = 45 * 1000;
 const LOGIN_STAGING_PREFIX = "login-staging-";
 const LOCAL_SESSION_LIMIT = 30;
+const RECENT_CONVERSATION_SEED_LIMIT = 100;
+const SHARED_REPAIR_BACKUPS_DIR = path.join(PROFILES_DIR, ".repair-backups");
+const SIDEBAR_WORKSPACE_FILTER_KEY = "sidebar-workspace-filter-v2";
+const SIDEBAR_ORGANIZE_MODE_KEY = "sidebar-organize-mode-v1";
+const THREAD_SORT_ATOM_KEY = "thread-sort-key";
 const GLOBAL_STATE_FILE_NAME = ".codex-global-state.json";
 const IGNORED_WORKSPACE_ROOTS = new Set([
   path.join(os.homedir(), "Documents", "Playground")
@@ -367,6 +379,22 @@ function filterObjectMapKeys(value) {
   );
 }
 
+function normalizeThreadWorkspaceRootHints(value) {
+  if (!isPlainObject(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).filter(([threadId, workspaceRoot]) => (
+      typeof threadId === "string" &&
+      threadId.trim() &&
+      typeof workspaceRoot === "string" &&
+      workspaceRoot.trim() &&
+      !IGNORED_WORKSPACE_ROOTS.has(workspaceRoot)
+    ))
+  );
+}
+
 function mergeThreadTitles(baseValue, sourceValue) {
   const baseTitles = isPlainObject(baseValue?.titles) ? baseValue.titles : {};
   const sourceTitles = isPlainObject(sourceValue?.titles) ? sourceValue.titles : {};
@@ -434,6 +462,10 @@ function mergeGlobalState(baseValue, sourceValue) {
     "thread-titles": mergeThreadTitles(
       baseState["thread-titles"],
       sourceState["thread-titles"]
+    ),
+    "thread-workspace-root-hints": mergeObjectMaps(
+      normalizeThreadWorkspaceRootHints(baseState["thread-workspace-root-hints"]),
+      normalizeThreadWorkspaceRootHints(sourceState["thread-workspace-root-hints"])
     ),
     "queued-follow-ups": mergeObjectMaps(
       baseState["queued-follow-ups"],
@@ -1365,7 +1397,10 @@ async function readSessionIndexEntries(limit = LOCAL_SESSION_LIMIT) {
   }
 
   entries.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
-  return entries.slice(0, limit);
+  if (Number.isFinite(limit)) {
+    return entries.slice(0, Math.max(0, Number(limit) || 0));
+  }
+  return entries;
 }
 
 function buildSessionIndexEntryFromThreadRow(row) {
@@ -1375,9 +1410,11 @@ function buildSessionIndexEntryFromThreadRow(row) {
   }
 
   const threadName =
-    (typeof row.thread_name === "string" && row.thread_name.trim()) ||
-    (typeof row.title === "string" && row.title.trim()) ||
-    (typeof row.first_user_message === "string" && row.first_user_message.trim()) ||
+    summarizeThreadName(
+      typeof row.thread_name === "string" ? row.thread_name : "",
+      typeof row.title === "string" ? row.title : "",
+      typeof row.first_user_message === "string" ? row.first_user_message : ""
+    ) ||
     `会话 ${id}`;
 
   return {
@@ -1385,6 +1422,210 @@ function buildSessionIndexEntryFromThreadRow(row) {
     thread_name: threadName,
     updated_at: toIsoFromUnixSeconds(Number(row.updated_at)) || null
   };
+}
+
+async function readThreadRowsForSidebarState(dbPath) {
+  if (!await pathExists(dbPath)) {
+    return [];
+  }
+
+  try {
+    const sql = [
+      "select id, title, first_user_message, updated_at, cwd",
+      "from threads",
+      "order by updated_at desc, id desc;"
+    ].join(" ");
+    const { stdout } = await execFileAsync("sqlite3", ["-json", dbPath, sql]);
+    return stdout.trim() ? JSON.parse(stdout) : [];
+  } catch {
+    return [];
+  }
+}
+
+function buildThreadOrderFromRows(threadRows, indexMap) {
+  const orderedIds = threadRows
+    .map((row) => String(row?.id || ""))
+    .filter(Boolean);
+  if (orderedIds.length > 0) {
+    return orderedIds;
+  }
+
+  return [...(indexMap?.values?.() || [])]
+    .sort((a, b) => {
+      const dateOrder = String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
+      if (dateOrder !== 0) {
+        return dateOrder;
+      }
+      return String(a.id || "").localeCompare(String(b.id || ""));
+    })
+    .map((entry) => entry.id);
+}
+
+function normalizeElectronPersistedAtomState(value) {
+  const nextState = isPlainObject(value) ? { ...value } : {};
+
+  nextState[SIDEBAR_WORKSPACE_FILTER_KEY] = "all";
+  nextState[SIDEBAR_ORGANIZE_MODE_KEY] = "project";
+  nextState[THREAD_SORT_ATOM_KEY] = "updated_at";
+  nextState["sidebar-collapsed-groups"] = filterObjectMapKeys(nextState["sidebar-collapsed-groups"]);
+
+  return nextState;
+}
+
+function extractReadableThreadLine(rawText) {
+  if (typeof rawText !== "string" || !rawText.trim()) {
+    return "";
+  }
+
+  const cleaned = rawText
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "\n")
+    .replace(/<[^>\n]+>/g, " ")
+    .replace(/\r/g, "\n");
+
+  const lines = cleaned
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^https?:\/\/\S+$/i.test(line) && lines[index + 1]) {
+      return lines[index + 1];
+    }
+    if (/^(askuserquestion|enterplanmode|enterworktree|exitplanmode|exitworktree|notebookedit|taskoutput|taskstop|todowrite|webfetch)$/i.test(line)) {
+      continue;
+    }
+    return line;
+  }
+
+  return "";
+}
+
+function summarizeThreadName(...values) {
+  for (const value of values) {
+    const line = extractReadableThreadLine(value);
+    if (!line) {
+      continue;
+    }
+    if (line.length <= 120) {
+      return line;
+    }
+    return `${line.slice(0, 117).trimEnd()}...`;
+  }
+  return "";
+}
+
+function isWorkspaceRootMatch(cwd, root) {
+  if (!cwd || !root) {
+    return false;
+  }
+  return cwd === root || cwd.startsWith(`${root}${path.sep}`);
+}
+
+function resolveWorkspaceRoot(cwd, workspaceRoots) {
+  const normalizedCwd = typeof cwd === "string" ? cwd.trim() : "";
+  if (!normalizedCwd) {
+    return "";
+  }
+
+  const matchedRoot = uniqueStrings(workspaceRoots)
+    .filter((root) => isWorkspaceRootMatch(normalizedCwd, root))
+    .sort((a, b) => b.length - a.length)[0];
+
+  return matchedRoot || normalizedCwd;
+}
+
+function scoreThreadNoise(threadName) {
+  const title = typeof threadName === "string" ? threadName.trim() : "";
+  if (!title) {
+    return 10;
+  }
+
+  const noisyPatterns = [
+    /^reply with\b/i,
+    /^reply in exactly\b/i,
+    /^please answer in exactly\b/i,
+    /^write exactly\b/i,
+    /^use the read tool\b/i,
+    /^you are an interactive agent\b/i,
+    /^你是谁$/u,
+    /^你是什么模型$/u,
+    /^ok$/i,
+    /^[A-Z_]+_OK$/i,
+    /^\d{6,}$/u
+  ];
+
+  for (const pattern of noisyPatterns) {
+    if (pattern.test(title)) {
+      return 100;
+    }
+  }
+
+  if (/exactly/i.test(title) || /nothing else/i.test(title)) {
+    return 80;
+  }
+
+  return 0;
+}
+
+function compareThreadOrderEntries(left, right) {
+  const noiseOrder = Number(left.noiseScore || 0) - Number(right.noiseScore || 0);
+  if (noiseOrder !== 0) {
+    return noiseOrder;
+  }
+
+  const dateOrder = String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""));
+  if (dateOrder !== 0) {
+    return dateOrder;
+  }
+
+  return String(left.id).localeCompare(String(right.id));
+}
+
+function compareThreadActivityEntries(left, right) {
+  const activityOrder = Number(right.activityTs || 0) - Number(left.activityTs || 0);
+  if (activityOrder !== 0) {
+    return activityOrder;
+  }
+
+  return String(right.id || "").localeCompare(String(left.id || ""));
+}
+
+function buildRoundRobinThreadOrder(entries, preferredWorkspaceRoots) {
+  return [...entries]
+    .sort(compareThreadActivityEntries)
+    .map((entry) => entry.id);
+}
+
+async function readThreadActivityMap(dbPath) {
+  if (!await pathExists(dbPath)) {
+    return new Map();
+  }
+
+  try {
+    const sql = [
+      "select thread_id, max(ts) as max_ts",
+      "from logs",
+      "where thread_id is not null",
+      "group by thread_id;"
+    ].join(" ");
+    const { stdout } = await execFileAsync("sqlite3", ["-json", dbPath, sql]);
+    const rows = stdout.trim() ? JSON.parse(stdout) : [];
+    return new Map(
+      rows
+        .map((row) => [String(row?.thread_id || ""), Number(row?.max_ts) || 0])
+        .filter(([threadId, maxTs]) => threadId && maxTs > 0)
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+function resolveThreadActivityTimestamp(row, activityMap) {
+  const threadId = row?.id ? String(row.id) : "";
+  const logTs = threadId ? Number(activityMap.get(threadId) || 0) : 0;
+  const createdAt = Number(row?.created_at) || 0;
+  return Math.max(logTs, createdAt);
 }
 
 async function readSessionIndexMap(filePath) {
@@ -1420,7 +1661,45 @@ async function readSessionIndexMap(filePath) {
 }
 
 async function writeSessionIndexMap(filePath, rowsMap) {
-  const rows = [...rowsMap.values()].sort((a, b) => {
+  const preferredOrder = arguments.length > 2 ? arguments[2] : null;
+  const content = buildSessionIndexContent(rowsMap, preferredOrder);
+  await ensureParentDir(filePath);
+  try {
+    const currentContent = await fsp.readFile(filePath, "utf8");
+    if (currentContent === content) {
+      return false;
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  const tmpPath = `${filePath}.tmp-${process.pid}`;
+  await fsp.writeFile(tmpPath, content, "utf8");
+  await fsp.rename(tmpPath, filePath);
+  return true;
+}
+
+function buildSessionIndexContent(rowsMap, preferredOrder = null) {
+  const orderedIds = Array.isArray(preferredOrder) ? preferredOrder : [];
+  const seen = new Set();
+  const rows = [];
+
+  for (const id of orderedIds) {
+    const normalizedId = String(id || "");
+    if (!normalizedId || seen.has(normalizedId)) {
+      continue;
+    }
+    const row = rowsMap.get(normalizedId);
+    if (!row) {
+      continue;
+    }
+    rows.push(row);
+    seen.add(normalizedId);
+  }
+
+  const leftovers = [...rowsMap.values()].filter((row) => !seen.has(String(row.id)));
+  leftovers.sort((a, b) => {
     const dateOrder = String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
     if (dateOrder !== 0) {
       return dateOrder;
@@ -1428,52 +1707,51 @@ async function writeSessionIndexMap(filePath, rowsMap) {
     return String(a.id).localeCompare(String(b.id));
   });
 
-  await ensureParentDir(filePath);
-  const tmpPath = `${filePath}.tmp-${process.pid}`;
-  const content = rows.length ? `${rows.map((row) => JSON.stringify(row)).join("\n")}\n` : "";
-  await fsp.writeFile(tmpPath, content, "utf8");
-  await fsp.rename(tmpPath, filePath);
+  rows.push(...leftovers);
+
+  return rows.length ? `${rows.map((row) => JSON.stringify(row)).join("\n")}\n` : "";
 }
 
-async function backfillSessionIndexFromStateDb(sessionIndexPath, dbPath) {
+async function backfillSessionIndexFromStateDb(sessionIndexPath, dbPath, globalStatePath = null) {
   if (!await pathExists(dbPath)) {
     return 0;
   }
 
   const rowsMap = await readSessionIndexMap(sessionIndexPath);
-  let threadRows = [];
-
-  try {
-    const sql = [
-      "select id, title, first_user_message, updated_at",
-      "from threads"
-    ].join(" ");
-    const { stdout } = await execFileAsync("sqlite3", ["-json", dbPath, sql]);
-    threadRows = stdout.trim() ? JSON.parse(stdout) : [];
-  } catch {
+  const threadRows = await readThreadRowsForSidebarState(dbPath);
+  if (threadRows.length === 0) {
     return 0;
   }
 
-  let added = 0;
+  let changed = 0;
   for (const row of threadRows) {
     const entry = buildSessionIndexEntryFromThreadRow(row);
-    if (!entry || rowsMap.has(entry.id)) {
+    if (!entry) {
       continue;
     }
+
+    const previous = rowsMap.get(entry.id);
+    const isSame =
+      previous &&
+      previous.thread_name === entry.thread_name &&
+      String(previous.updated_at || "") === String(entry.updated_at || "");
+    if (isSame) {
+      continue;
+    }
+
     rowsMap.set(entry.id, entry);
-    added += 1;
+    changed += 1;
   }
 
-  if (added > 0) {
-    await writeSessionIndexMap(sessionIndexPath, rowsMap);
-  }
-
-  return added;
+  const preferredOrder = buildThreadOrderFromRows(threadRows, rowsMap);
+  const wrote = await writeSessionIndexMap(sessionIndexPath, rowsMap, preferredOrder);
+  return wrote ? Math.max(changed, 1) : 0;
 }
 
-async function backfillThreadTitlesInGlobalState(globalStatePath, sessionIndexPath) {
+async function backfillThreadTitlesInGlobalState(globalStatePath, sessionIndexPath, dbPath) {
   const indexMap = await readSessionIndexMap(sessionIndexPath);
-  if (indexMap.size === 0) {
+  const threadRows = await readThreadRowsForSidebarState(dbPath);
+  if (indexMap.size === 0 && threadRows.length === 0) {
     return 0;
   }
 
@@ -1482,25 +1760,19 @@ async function backfillThreadTitlesInGlobalState(globalStatePath, sessionIndexPa
   const currentThreadTitles = isPlainObject(baseState["thread-titles"]) ? baseState["thread-titles"] : {};
   const currentTitles = isPlainObject(currentThreadTitles.titles) ? { ...currentThreadTitles.titles } : {};
   const currentOrder = Array.isArray(currentThreadTitles.order) ? currentThreadTitles.order : [];
+  const currentHints = normalizeThreadWorkspaceRootHints(baseState["thread-workspace-root-hints"]);
+  const currentLabels = filterObjectMapKeys(baseState["electron-workspace-root-labels"]);
 
-  let added = 0;
+  let changedCount = 0;
   for (const entry of indexMap.values()) {
-    if (!entry.thread_name || currentTitles[entry.id]) {
+    if (!entry.thread_name || currentTitles[entry.id] === entry.thread_name) {
       continue;
     }
     currentTitles[entry.id] = entry.thread_name;
-    added += 1;
+    changedCount += 1;
   }
 
-  const sortedIds = [...indexMap.values()]
-    .sort((a, b) => {
-      const dateOrder = String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
-      if (dateOrder !== 0) {
-        return dateOrder;
-      }
-      return String(a.id).localeCompare(String(b.id));
-    })
-    .map((entry) => entry.id);
+  const sortedIds = buildThreadOrderFromRows(threadRows, indexMap);
 
   const nextThreadTitles = {
     titles: currentTitles,
@@ -1510,34 +1782,177 @@ async function backfillThreadTitlesInGlobalState(globalStatePath, sessionIndexPa
       ...Object.keys(currentTitles)
     ])
   };
+  const knownWorkspaceRoots = getKnownWorkspaceRoots(baseState);
+  const nextHints = { ...currentHints };
+  for (const row of threadRows) {
+    const threadId = row?.id ? String(row.id) : "";
+    const cwd = typeof row?.cwd === "string" ? row.cwd.trim() : "";
+    if (!threadId || !cwd) {
+      continue;
+    }
+
+    const workspaceRoot = resolveWorkspaceRoot(cwd, knownWorkspaceRoots);
+    if (!workspaceRoot || nextHints[threadId] === workspaceRoot) {
+      continue;
+    }
+
+    nextHints[threadId] = workspaceRoot;
+    changedCount += 1;
+  }
+
+  const nextLabels = { ...currentLabels };
+  const allDiscoveredRoots = uniqueStrings(Object.values(nextHints));
+  for (const workspaceRoot of allDiscoveredRoots) {
+    if (nextLabels[workspaceRoot]) {
+      continue;
+    }
+    nextLabels[workspaceRoot] = getWorkspaceRootLabel(workspaceRoot);
+    changedCount += 1;
+  }
+
+  // Ensure all workspace roots with sessions are registered in electron-saved-workspace-roots
+  // so the Codex App sidebar recognizes them as projects.
+  const currentSavedRoots = Array.isArray(baseState["electron-saved-workspace-roots"])
+    ? baseState["electron-saved-workspace-roots"]
+    : [];
+  const nextSavedRoots = uniqueStrings([...currentSavedRoots, ...allDiscoveredRoots]);
+  const nextProjectOrder = uniqueStrings([
+    ...(Array.isArray(baseState["project-order"]) ? baseState["project-order"] : []),
+    ...nextSavedRoots
+  ]);
+
+  const nextPersistedAtomState = normalizeElectronPersistedAtomState(
+    baseState["electron-persisted-atom-state"]
+  );
 
   const changed =
     JSON.stringify(currentThreadTitles.titles || {}) !== JSON.stringify(nextThreadTitles.titles) ||
-    JSON.stringify(currentThreadTitles.order || []) !== JSON.stringify(nextThreadTitles.order);
+    JSON.stringify(currentThreadTitles.order || []) !== JSON.stringify(nextThreadTitles.order) ||
+    JSON.stringify(currentHints) !== JSON.stringify(nextHints) ||
+    JSON.stringify(currentLabels) !== JSON.stringify(nextLabels) ||
+    JSON.stringify(currentSavedRoots) !== JSON.stringify(nextSavedRoots) ||
+    JSON.stringify(baseState["electron-persisted-atom-state"] || {}) !== JSON.stringify(nextPersistedAtomState);
 
   if (!changed) {
     return 0;
   }
 
   baseState["thread-titles"] = nextThreadTitles;
+  baseState["thread-workspace-root-hints"] = nextHints;
+  baseState["electron-workspace-root-labels"] = nextLabels;
+  baseState["electron-saved-workspace-roots"] = nextSavedRoots;
+  baseState["project-order"] = nextProjectOrder;
+  baseState["electron-persisted-atom-state"] = nextPersistedAtomState;
   await writeJsonAtomic(globalStatePath, baseState);
-  return added;
+  return changedCount;
+}
+
+// Re-align the shared DB's updated_at ordering to true thread recency so
+// Codex desktop shows the latest sessions first while preserving project grouping.
+async function realignThreadUpdatedAtToGlobalOrder(dbPath, globalStatePath) {
+  if (!await pathExists(dbPath)) {
+    return 0;
+  }
+
+  let threadRows = [];
+  const activityMap = await readThreadActivityMap(dbPath);
+  try {
+    const sql = [
+      "select id, updated_at, created_at",
+      "from threads",
+      "order by updated_at desc, id desc;"
+    ].join(" ");
+    const { stdout } = await execFileAsync("sqlite3", ["-json", dbPath, sql]);
+    threadRows = stdout.trim() ? JSON.parse(stdout) : [];
+  } catch {
+    return 0;
+  }
+
+  if (threadRows.length === 0) {
+    return 0;
+  }
+
+  const rowsById = new Map();
+  for (const row of threadRows) {
+    const id = row?.id ? String(row.id) : "";
+    if (!id) {
+      continue;
+    }
+    rowsById.set(id, row);
+  }
+
+  const assignments = [];
+  for (const row of threadRows) {
+    const id = String(row?.id || "");
+    if (!id) {
+      continue;
+    }
+    const targetUpdatedAt = Math.max(1, resolveThreadActivityTimestamp(row, activityMap) || Number(row?.updated_at) || 1);
+    const currentUpdatedAt = Number(rowsById.get(id)?.updated_at) || 0;
+    if (currentUpdatedAt !== targetUpdatedAt) {
+      assignments.push({ id, updatedAt: targetUpdatedAt });
+    }
+  }
+
+  if (assignments.length === 0) {
+    return 0;
+  }
+
+  const whenClauses = assignments
+    .map((item) => `WHEN ${sqlLiteral(item.id)} THEN ${item.updatedAt}`)
+    .join("\n");
+  const whereIds = assignments.map((item) => sqlLiteral(item.id)).join(", ");
+  const script = [
+    "BEGIN IMMEDIATE;",
+    "UPDATE threads",
+    "SET updated_at = CASE id",
+    whenClauses,
+    "ELSE updated_at END",
+    `WHERE id IN (${whereIds});`,
+    "COMMIT;",
+    "PRAGMA wal_checkpoint(TRUNCATE);"
+  ].join("\n");
+
+  await execFileAsync("sqlite3", [dbPath, script]);
+  return assignments.length;
+}
+
+async function promoteWorkspaceRepresentativeThreadsToSeedPage(
+  dbPath,
+  globalStatePath,
+  seedLimit = RECENT_CONVERSATION_SEED_LIMIT
+) {
+  return 0;
+}
+
+async function rebalanceSharedSessionPresentation() {
+  return 0;
 }
 
 async function readLocalSessions(limit = LOCAL_SESSION_LIMIT) {
-  const indexEntries = await readSessionIndexEntries(limit);
+  return readSharedSessions(limit);
+}
+
+async function readSharedSessions(limit = LOCAL_SESSION_LIMIT) {
+  const normalizedLimit = Number.isFinite(limit) ? Math.max(0, Number(limit) || 0) : null;
+  const indexEntries = await readSessionIndexEntries(normalizedLimit);
   const indexById = new Map(indexEntries.map((entry) => [entry.id, entry]));
   const dbPath = path.join(SHARED_SESSIONS_DIR, "state_5.sqlite");
   let threadRows = [];
 
   if (await pathExists(dbPath)) {
     try {
-      const sql = [
+      const sqlParts = [
         "select id, updated_at, cwd, source, archived, rollout_path, model_provider, model",
         "from threads",
-        "order by updated_at desc",
-        `limit ${Math.max(limit * 2, limit)};`
-      ].join(" ");
+        "order by updated_at desc"
+      ];
+      if (normalizedLimit != null) {
+        sqlParts.push(`limit ${Math.max(normalizedLimit * 2, normalizedLimit)};`);
+      } else {
+        sqlParts.push(";");
+      }
+      const sql = sqlParts.join(" ");
       const { stdout } = await execFileAsync("sqlite3", ["-json", dbPath, sql]);
       threadRows = stdout.trim() ? JSON.parse(stdout) : [];
     } catch {
@@ -1579,9 +1994,375 @@ async function readLocalSessions(limit = LOCAL_SESSION_LIMIT) {
     });
   }
 
-  return [...merged.values()]
-    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
-    .slice(0, limit);
+  const ordered = [...merged.values()]
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+
+  if (normalizedLimit != null) {
+    return ordered.slice(0, normalizedLimit);
+  }
+  return ordered;
+}
+
+function getKnownWorkspaceRoots(globalState) {
+  return uniqueStrings([
+    ...(Array.isArray(globalState?.["project-order"]) ? globalState["project-order"] : []),
+    ...(Array.isArray(globalState?.["electron-saved-workspace-roots"]) ? globalState["electron-saved-workspace-roots"] : []),
+    ...(Array.isArray(globalState?.["active-workspace-roots"]) ? globalState["active-workspace-roots"] : [])
+  ]);
+}
+
+function getWorkspaceRootLabel(workspaceRoot) {
+  const normalizedRoot = typeof workspaceRoot === "string" ? workspaceRoot.trim() : "";
+  if (!normalizedRoot) {
+    return "未分组";
+  }
+
+  const label = path.basename(normalizedRoot);
+  return label || normalizedRoot;
+}
+
+function buildSessionBrowserPayload(sessions, globalState) {
+  const knownWorkspaceRoots = getKnownWorkspaceRoots(globalState);
+  const sidebarSeedIds = new Set(
+    sessions
+      .slice(0, RECENT_CONVERSATION_SEED_LIMIT)
+      .map((session) => String(session.id || ""))
+      .filter(Boolean)
+  );
+  const projectRank = new Map(knownWorkspaceRoots.map((root, index) => [root, index]));
+  const projectsByRoot = new Map();
+
+  for (const session of sessions) {
+    const workspaceRoot = resolveWorkspaceRoot(session.cwd, knownWorkspaceRoots);
+    const projectKey = workspaceRoot || `cwd:${session.cwd || ""}` || `id:${session.id}`;
+    const sidebarSeeded = sidebarSeedIds.has(String(session.id || ""));
+
+    if (!projectsByRoot.has(projectKey)) {
+      projectsByRoot.set(projectKey, {
+        workspaceRoot,
+        label: getWorkspaceRootLabel(workspaceRoot || session.cwd || ""),
+        totalCount: 0,
+        sidebarCount: 0,
+        hiddenCount: 0,
+        latestUpdatedAt: session.updatedAt || null,
+        sessions: []
+      });
+    }
+
+    const project = projectsByRoot.get(projectKey);
+    project.totalCount += 1;
+    if (sidebarSeeded) {
+      project.sidebarCount += 1;
+    }
+    if (!project.latestUpdatedAt || String(session.updatedAt || "") > String(project.latestUpdatedAt || "")) {
+      project.latestUpdatedAt = session.updatedAt || project.latestUpdatedAt;
+    }
+    project.sessions.push({
+      ...session,
+      workspaceRoot,
+      sidebarSeeded
+    });
+  }
+
+  const projects = [...projectsByRoot.values()]
+    .map((project) => ({
+      ...project,
+      hiddenCount: Math.max(project.totalCount - project.sidebarCount, 0)
+    }))
+    .sort((left, right) => {
+      const leftRank = left.workspaceRoot && projectRank.has(left.workspaceRoot)
+        ? projectRank.get(left.workspaceRoot)
+        : Number.MAX_SAFE_INTEGER;
+      const rightRank = right.workspaceRoot && projectRank.has(right.workspaceRoot)
+        ? projectRank.get(right.workspaceRoot)
+        : Number.MAX_SAFE_INTEGER;
+      if (leftRank !== rightRank) {
+        return leftRank - rightRank;
+      }
+
+      const dateOrder = String(right.latestUpdatedAt || "").localeCompare(String(left.latestUpdatedAt || ""));
+      if (dateOrder !== 0) {
+        return dateOrder;
+      }
+      return String(left.label || "").localeCompare(String(right.label || ""));
+    });
+
+  return {
+    summary: {
+      totalSessions: sessions.length,
+      totalProjects: projects.length,
+      sidebarWindowSize: RECENT_CONVERSATION_SEED_LIMIT,
+      visibleProjects: projects.filter((project) => project.sidebarCount > 0).length,
+      hiddenSessions: Math.max(sessions.length - Math.min(sessions.length, RECENT_CONVERSATION_SEED_LIMIT), 0)
+    },
+    projects
+  };
+}
+
+async function readSessionBrowserState() {
+  const sessionIndexPath = path.join(SHARED_SESSIONS_DIR, "session_index.jsonl");
+  const dbPath = path.join(SHARED_SESSIONS_DIR, "state_5.sqlite");
+
+  await backfillSessionIndexFromStateDb(sessionIndexPath, dbPath, SHARED_GLOBAL_STATE_PATH);
+  await backfillThreadTitlesInGlobalState(SHARED_GLOBAL_STATE_PATH, sessionIndexPath, dbPath);
+
+  const globalState = await readJsonIfExists(SHARED_GLOBAL_STATE_PATH);
+  const sessions = await readSharedSessions(null);
+  return buildSessionBrowserPayload(sessions, globalState);
+}
+
+async function findSharedSessionById(sessionId) {
+  const normalizedId = typeof sessionId === "string" ? sessionId.trim() : "";
+  if (!normalizedId) {
+    return null;
+  }
+
+  const sessions = await readSharedSessions(null);
+  return sessions.find((session) => session.id === normalizedId) || null;
+}
+
+function isPathWithin(basePath, targetPath) {
+  const normalizedBase = path.resolve(basePath);
+  const normalizedTarget = path.resolve(targetPath);
+  return normalizedTarget === normalizedBase || normalizedTarget.startsWith(`${normalizedBase}${path.sep}`);
+}
+
+function isSessionArtifactPath(targetPath) {
+  const normalizedTarget = typeof targetPath === "string" ? path.resolve(targetPath) : "";
+  if (!normalizedTarget) {
+    return false;
+  }
+
+  const allowedRoots = [
+    path.join(SHARED_SESSIONS_DIR, "sessions"),
+    path.join(SHARED_SESSIONS_DIR, "shell_snapshots"),
+    path.join(ACTIVE_CODEX_DIR, "sessions"),
+    path.join(ACTIVE_CODEX_DIR, "shell_snapshots")
+  ];
+  return allowedRoots.some((rootPath) => isPathWithin(rootPath, normalizedTarget));
+}
+
+async function collectFilesContainingText(rootDir, needle) {
+  const normalizedNeedle = typeof needle === "string" ? needle.trim() : "";
+  if (!normalizedNeedle || !await pathExists(rootDir)) {
+    return [];
+  }
+
+  const matches = [];
+  const queue = [rootDir];
+  while (queue.length > 0) {
+    const currentDir = queue.pop();
+    let entries = [];
+    try {
+      entries = await fsp.readdir(currentDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        queue.push(fullPath);
+        continue;
+      }
+      if (entry.isFile() && entry.name.includes(normalizedNeedle)) {
+        matches.push(fullPath);
+      }
+    }
+  }
+
+  return matches;
+}
+
+async function removeThreadFromSharedGlobalState(threadId) {
+  const normalizedId = typeof threadId === "string" ? threadId.trim() : "";
+  if (!normalizedId) {
+    return false;
+  }
+
+  const state = await readJsonIfExists(SHARED_GLOBAL_STATE_PATH);
+  if (!isPlainObject(state)) {
+    return false;
+  }
+
+  let changed = false;
+  const nextState = { ...state };
+
+  const threadTitles = isPlainObject(nextState["thread-titles"]) ? { ...nextState["thread-titles"] } : null;
+  if (threadTitles) {
+    const titles = isPlainObject(threadTitles.titles) ? { ...threadTitles.titles } : {};
+    const order = Array.isArray(threadTitles.order) ? threadTitles.order : [];
+    if (Object.prototype.hasOwnProperty.call(titles, normalizedId)) {
+      delete titles[normalizedId];
+      changed = true;
+    }
+    const nextOrder = order.filter((id) => String(id || "") !== normalizedId);
+    if (nextOrder.length !== order.length) {
+      changed = true;
+    }
+    threadTitles.titles = titles;
+    threadTitles.order = nextOrder;
+    nextState["thread-titles"] = threadTitles;
+  }
+
+  if (isPlainObject(nextState["thread-workspace-root-hints"]) && Object.prototype.hasOwnProperty.call(nextState["thread-workspace-root-hints"], normalizedId)) {
+    const nextHints = { ...nextState["thread-workspace-root-hints"] };
+    delete nextHints[normalizedId];
+    nextState["thread-workspace-root-hints"] = nextHints;
+    changed = true;
+  }
+
+  if (isPlainObject(nextState["queued-follow-ups"]) && Object.prototype.hasOwnProperty.call(nextState["queued-follow-ups"], normalizedId)) {
+    const nextQueued = { ...nextState["queued-follow-ups"] };
+    delete nextQueued[normalizedId];
+    nextState["queued-follow-ups"] = nextQueued;
+    changed = true;
+  }
+
+  if (Array.isArray(nextState["pinned-thread-ids"])) {
+    const previous = nextState["pinned-thread-ids"];
+    const nextPinned = previous.filter((id) => String(id || "") !== normalizedId);
+    if (nextPinned.length !== previous.length) {
+      nextState["pinned-thread-ids"] = nextPinned;
+      changed = true;
+    }
+  }
+
+  const atomState = isPlainObject(nextState["electron-persisted-atom-state"])
+    ? { ...nextState["electron-persisted-atom-state"] }
+    : null;
+  if (atomState && Array.isArray(atomState["pinned-thread-ids"])) {
+    const previousPinned = atomState["pinned-thread-ids"];
+    const nextPinned = previousPinned.filter((id) => String(id || "") !== normalizedId);
+    if (nextPinned.length !== previousPinned.length) {
+      atomState["pinned-thread-ids"] = nextPinned;
+      nextState["electron-persisted-atom-state"] = atomState;
+      changed = true;
+    }
+  }
+
+  if (!changed) {
+    return false;
+  }
+
+  await writeJsonAtomic(SHARED_GLOBAL_STATE_PATH, nextState);
+  return true;
+}
+
+async function deleteSharedSessionById(sessionId) {
+  const normalizedId = typeof sessionId === "string" ? sessionId.trim() : "";
+  if (!normalizedId) {
+    return {
+      ok: false,
+      error: "Invalid session id"
+    };
+  }
+
+  const session = await findSharedSessionById(normalizedId);
+  if (!session) {
+    return {
+      ok: false,
+      notFound: true,
+      error: "Session not found"
+    };
+  }
+
+  const stateDbPath = path.join(SHARED_SESSIONS_DIR, "state_5.sqlite");
+  const logsDbPath = path.join(SHARED_SESSIONS_DIR, "logs_1.sqlite");
+  const sessionIndexPath = path.join(SHARED_SESSIONS_DIR, "session_index.jsonl");
+  const threadIdLiteral = sqlLiteral(normalizedId);
+
+  if (await pathExists(stateDbPath)) {
+    const deleteScript = [
+      "PRAGMA foreign_keys = ON;",
+      "BEGIN IMMEDIATE;",
+      `DELETE FROM thread_dynamic_tools WHERE thread_id = ${threadIdLiteral};`,
+      `DELETE FROM stage1_outputs WHERE thread_id = ${threadIdLiteral};`,
+      `DELETE FROM thread_spawn_edges WHERE child_thread_id = ${threadIdLiteral} OR parent_thread_id = ${threadIdLiteral};`,
+      `DELETE FROM agent_job_items WHERE assigned_thread_id = ${threadIdLiteral};`,
+      `DELETE FROM logs WHERE thread_id = ${threadIdLiteral};`,
+      `DELETE FROM threads WHERE id = ${threadIdLiteral};`,
+      "COMMIT;",
+      "PRAGMA wal_checkpoint(TRUNCATE);"
+    ].join("\n");
+    await execFileAsync("sqlite3", [stateDbPath, deleteScript]);
+  }
+
+  if (await pathExists(logsDbPath)) {
+    const deleteLogsScript = [
+      "BEGIN IMMEDIATE;",
+      `DELETE FROM logs WHERE thread_id = ${threadIdLiteral};`,
+      "COMMIT;",
+      "PRAGMA wal_checkpoint(TRUNCATE);"
+    ].join("\n");
+    await execFileAsync("sqlite3", [logsDbPath, deleteLogsScript]);
+  }
+
+  const rowsMap = await readSessionIndexMap(sessionIndexPath);
+  const hadIndexEntry = rowsMap.delete(normalizedId);
+  let wroteSessionIndex = false;
+  if (hadIndexEntry) {
+    wroteSessionIndex = await writeSessionIndexMap(sessionIndexPath, rowsMap);
+  }
+
+  const wroteGlobalState = await removeThreadFromSharedGlobalState(normalizedId);
+
+  const artifactCandidates = new Set();
+  const rolloutPath = typeof session.rolloutPath === "string" ? session.rolloutPath.trim() : "";
+  if (rolloutPath) {
+    artifactCandidates.add(path.resolve(rolloutPath));
+  }
+
+  for (const matchedPath of await collectFilesContainingText(path.join(SHARED_SESSIONS_DIR, "sessions"), normalizedId)) {
+    artifactCandidates.add(path.resolve(matchedPath));
+  }
+  for (const matchedPath of await collectFilesContainingText(path.join(SHARED_SESSIONS_DIR, "shell_snapshots"), normalizedId)) {
+    artifactCandidates.add(path.resolve(matchedPath));
+  }
+
+  let deletedFiles = 0;
+  for (const targetPath of artifactCandidates) {
+    if (!isSessionArtifactPath(targetPath) || !await pathExists(targetPath)) {
+      continue;
+    }
+    try {
+      await fsp.unlink(targetPath);
+      deletedFiles += 1;
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  await backfillThreadTitlesInGlobalState(
+    SHARED_GLOBAL_STATE_PATH,
+    sessionIndexPath,
+    stateDbPath
+  );
+
+  return {
+    ok: true,
+    id: normalizedId,
+    title: session.title || normalizedId,
+    deletedFiles,
+    wroteSessionIndex,
+    wroteGlobalState
+  };
+}
+
+function shellQuote(value) {
+  return `'${String(value || "").replace(/'/g, `'\\''`)}'`;
+}
+
+function isHomeRelativePath(targetPath) {
+  const normalizedPath = typeof targetPath === "string" ? path.resolve(targetPath) : "";
+  if (!normalizedPath) {
+    return false;
+  }
+
+  const homePath = os.homedir();
+  return normalizedPath === homePath || normalizedPath.startsWith(`${homePath}${path.sep}`);
 }
 
 async function pathExists(targetPath) {
@@ -1680,6 +2461,65 @@ async function copySqliteFamily(srcBasePath, destBasePath) {
   }
 }
 
+function formatBackupTimestamp() {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+async function backupSharedStateDbForRepair(dbPath) {
+  if (!await pathExists(dbPath)) {
+    return null;
+  }
+
+  const backupRoot = path.join(SHARED_REPAIR_BACKUPS_DIR, formatBackupTimestamp());
+  await ensureDir(backupRoot);
+  await copySqliteFamily(dbPath, path.join(backupRoot, path.basename(dbPath)));
+  return backupRoot;
+}
+
+async function promoteSharedThreadRecencyForSidebar() {
+  const dbPath = path.join(SHARED_SESSIONS_DIR, "state_5.sqlite");
+  const sessionIndexPath = path.join(SHARED_SESSIONS_DIR, "session_index.jsonl");
+  if (!await pathExists(dbPath)) {
+    return {
+      ok: true,
+      updated: 0,
+      totalThreads: 0,
+      backupRoot: null
+    };
+  }
+
+  const threadRows = await readThreadRowsForSidebarState(dbPath);
+  if (threadRows.length === 0) {
+    return {
+      ok: true,
+      updated: 0,
+      totalThreads: 0,
+      backupRoot: null
+    };
+  }
+
+  const backupRoot = await backupSharedStateDbForRepair(dbPath);
+  const updatedCount = await realignThreadUpdatedAtToGlobalOrder(dbPath, SHARED_GLOBAL_STATE_PATH);
+  if (updatedCount === 0) {
+    return {
+      ok: true,
+      updated: 0,
+      totalThreads: threadRows.length,
+      backupRoot
+    };
+  }
+
+  await backfillSessionIndexFromStateDb(sessionIndexPath, dbPath, SHARED_GLOBAL_STATE_PATH);
+  await backfillThreadTitlesInGlobalState(SHARED_GLOBAL_STATE_PATH, sessionIndexPath, dbPath);
+
+  return {
+    ok: true,
+    updated: updatedCount,
+    totalThreads: threadRows.length,
+    backupRoot
+  };
+}
+
 async function mergeGlobalStateFile(sharedPath, sourcePath) {
   if (!await pathExists(sourcePath)) {
     return;
@@ -1766,6 +2606,22 @@ async function mergeDirectoryInto(sharedDirPath, sourceDirPath) {
   await execFileAsync("rsync", ["-a", `${sourceDirPath}/`, `${sharedDirPath}/`]);
 }
 
+async function checkpointSqliteIfNeeded(filePath) {
+  if (!filePath.endsWith(".sqlite")) {
+    return;
+  }
+  if (!await pathExists(filePath)) {
+    return;
+  }
+  const stat = await fsp.lstat(filePath);
+  if (stat.isSymbolicLink()) {
+    return;
+  }
+  try {
+    await execFileAsync("sqlite3", [filePath, "PRAGMA wal_checkpoint(TRUNCATE);"]);
+  } catch {}
+}
+
 async function linkProfileItemToShared(profileDir, itemName) {
   const profileItemPath = path.join(profileDir, itemName);
   const sharedItemPath = path.join(SHARED_SESSIONS_DIR, itemName);
@@ -1782,6 +2638,10 @@ async function linkProfileItemToShared(profileDir, itemName) {
   } else {
     await ensureParentDir(sharedItemPath);
   }
+
+  // Flush any pending WAL data before removing the original file
+  await checkpointSqliteIfNeeded(profileItemPath);
+  await checkpointSqliteIfNeeded(sharedItemPath);
 
   await fsp.rm(profileItemPath, { recursive: true, force: true });
   await fsp.symlink(sharedItemPath, profileItemPath);
@@ -1819,7 +2679,8 @@ async function syncSessionArtifactsFromDir(sourceDir) {
 
   await backfillSessionIndexFromStateDb(
     path.join(SHARED_SESSIONS_DIR, "session_index.jsonl"),
-    path.join(SHARED_SESSIONS_DIR, "state_5.sqlite")
+    path.join(SHARED_SESSIONS_DIR, "state_5.sqlite"),
+    SHARED_GLOBAL_STATE_PATH
   );
 }
 
@@ -1831,7 +2692,8 @@ async function syncGlobalStateFromDir(sourceDir) {
 
   await backfillThreadTitlesInGlobalState(
     SHARED_GLOBAL_STATE_PATH,
-    path.join(SHARED_SESSIONS_DIR, "session_index.jsonl")
+    path.join(SHARED_SESSIONS_DIR, "session_index.jsonl"),
+    path.join(SHARED_SESSIONS_DIR, "state_5.sqlite")
   );
 }
 
@@ -1953,6 +2815,17 @@ async function readAuthForProfile(activeProfile, name) {
 }
 
 async function getProfilesState() {
+  await backfillSessionIndexFromStateDb(
+    path.join(SHARED_SESSIONS_DIR, "session_index.jsonl"),
+    path.join(SHARED_SESSIONS_DIR, "state_5.sqlite"),
+    SHARED_GLOBAL_STATE_PATH
+  );
+  await backfillThreadTitlesInGlobalState(
+    SHARED_GLOBAL_STATE_PATH,
+    path.join(SHARED_SESSIONS_DIR, "session_index.jsonl"),
+    path.join(SHARED_SESSIONS_DIR, "state_5.sqlite")
+  );
+
   const activeProfile = await readCurrentProfile();
   await cleanupOrphanLoginStagingProfiles(activeProfile);
   const loginStatus = await readLoginStatus();
@@ -2363,6 +3236,101 @@ function sanitizePublicMessage(result) {
   return result.stderr || result.stdout || result.message || "Command failed";
 }
 
+async function resetCodexDesktopCaches() {
+  if (!await pathExists(CODEX_APP_SUPPORT_DIR)) {
+    return { ok: true, moved: [] };
+  }
+
+  const backupRoot = path.join(
+    CODEX_APP_SUPPORT_DIR,
+    `.switch-cache-backup-${new Date().toISOString().replace(/[:.]/g, "-")}`
+  );
+  const moved = [];
+
+  for (const itemName of CODEX_CACHE_RESET_ITEMS) {
+    const sourcePath = path.join(CODEX_APP_SUPPORT_DIR, itemName);
+    if (!await pathExists(sourcePath)) {
+      continue;
+    }
+
+    await ensureDir(backupRoot);
+    const targetPath = path.join(backupRoot, itemName);
+    await ensureParentDir(targetPath);
+    await fsp.rename(sourcePath, targetPath);
+    moved.push(itemName);
+  }
+
+  return {
+    ok: true,
+    backupRoot: moved.length > 0 ? backupRoot : null,
+    moved
+  };
+}
+
+async function rebuildCodexSidebar() {
+  const processes = await listCodexProcesses();
+  let closeResult = null;
+  if (processes.length > 0) {
+    closeResult = await closeCodexProcesses();
+    if (!closeResult.ok) {
+      return {
+        ok: false,
+        message: "Failed to close Codex-related processes before rebuilding sidebar",
+        closeResult
+      };
+    }
+  }
+
+  await ensureSharedSessionsLayout();
+  let recencyRepairResult = null;
+  try {
+    recencyRepairResult = await promoteSharedThreadRecencyForSidebar();
+  } catch (error) {
+    return {
+      ok: false,
+      message: error.message || "Failed to refresh shared thread recency for sidebar",
+      closeResult
+    };
+  }
+
+  let cacheResetResult = null;
+  try {
+    cacheResetResult = await resetCodexDesktopCaches();
+  } catch (error) {
+    return {
+      ok: false,
+      message: error.message || "Failed to reset Codex desktop caches",
+      closeResult
+    };
+  }
+
+  for (const { baseName } of SQLITE_SESSION_DATABASES) {
+    await checkpointSqliteIfNeeded(path.join(SHARED_SESSIONS_DIR, baseName));
+  }
+
+  const openResult = await openMacTarget(["-a", "Codex"]);
+  if (!openResult.ok) {
+    return {
+      ok: false,
+      message: openResult.message || "Failed to reopen Codex",
+      closeResult,
+      cacheResetResult,
+      openedCodex: false
+    };
+  }
+
+  return {
+    ok: true,
+    message: cacheResetResult?.moved?.length
+      ? "已重建 Codex 侧边栏缓存并重新打开 Codex"
+      : "已重新打开 Codex，并按共享会话状态重建侧边栏",
+    closeResult,
+    recencyRepairResult,
+    cacheResetResult,
+    openedCodex: true
+  };
+}
+
 async function performProfileSwitch(targetName, options = {}) {
   const closeAndForce = options.closeAndForce === true;
   const openCodex = options.openCodex === true;
@@ -2420,6 +3388,39 @@ async function performProfileSwitch(targetName, options = {}) {
     };
   }
 
+  let recencyRepairResult = null;
+  if (result.ok && activeProfile === targetName) {
+    await ensureSharedSessionsLayout(targetName);
+    try {
+      recencyRepairResult = await promoteSharedThreadRecencyForSidebar();
+    } catch (error) {
+      recencyRepairResult = {
+        ok: false,
+        error: error.message || "Failed to refresh shared thread recency for sidebar"
+      };
+    }
+  }
+
+  let cacheResetResult = null;
+  if (result.ok && activeProfile === targetName && closeAndForce) {
+    try {
+      cacheResetResult = await resetCodexDesktopCaches();
+    } catch (error) {
+      cacheResetResult = {
+        ok: false,
+        error: error.message || "Failed to reset Codex desktop caches"
+      };
+    }
+  }
+
+  // Checkpoint all shared SQLite databases before reopening Codex
+  // so the app sees fully-committed data instead of stale WAL entries
+  if (result.ok && activeProfile === targetName) {
+    for (const { baseName } of SQLITE_SESSION_DATABASES) {
+      await checkpointSqliteIfNeeded(path.join(SHARED_SESSIONS_DIR, baseName));
+    }
+  }
+
   let openResult = null;
   if (result.ok && openCodex) {
     openResult = await openMacTarget(["-a", "Codex"]);
@@ -2431,7 +3432,9 @@ async function performProfileSwitch(targetName, options = {}) {
     openedCodex: openResult?.ok === true,
     activeProfile,
     forced,
-    closeResult
+    closeResult,
+    recencyRepairResult,
+    cacheResetResult
   };
 }
 
@@ -2568,6 +3571,16 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (req.method === "GET" && pathname === "/api/sessions") {
+    const sessionBrowser = await readSessionBrowserState();
+    sendJson(res, 200, {
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      ...sessionBrowser
+    });
+    return;
+  }
+
   if (req.method === "POST" && pathname === "/api/profile/save") {
     const body = await parseBody(req);
     if (!isValidProfileName(body.name)) {
@@ -2657,6 +3670,12 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/codex/rebuild-sidebar") {
+    const result = await rebuildCodexSidebar();
+    sendJson(res, result.ok ? 200 : 409, result);
+    return;
+  }
+
   if (req.method === "GET" && pathname === "/api/auto-switch") {
     sendJson(res, 200, {
       ok: true,
@@ -2718,6 +3737,93 @@ async function handleApi(req, res, pathname) {
   if (req.method === "POST" && pathname === "/api/profile/auto-register-active") {
     const result = await autoRegisterActiveProfile();
     sendJson(res, result.ok ? 200 : 400, result);
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/session/resume") {
+    const body = await parseBody(req);
+    const session = await findSharedSessionById(body.id);
+    if (!session) {
+      sendJson(res, 404, { ok: false, error: "Session not found" });
+      return;
+    }
+
+    const commandParts = [];
+    if (session.cwd) {
+      commandParts.push(`cd ${shellQuote(session.cwd)}`);
+    }
+    commandParts.push(`codex resume --all ${shellQuote(session.id)}`);
+    const result = await openTerminalCommand(commandParts.join(" && "));
+    sendJson(res, result.ok ? 200 : 500, {
+      ok: result.ok,
+      message: result.ok
+        ? `已在 Terminal 打开会话：${session.title || session.id}`
+        : result.message
+    });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/session/delete") {
+    const body = await parseBody(req);
+    const sessionId = typeof body.id === "string" ? body.id.trim() : "";
+    if (!sessionId) {
+      sendJson(res, 400, { ok: false, error: "Invalid session id" });
+      return;
+    }
+
+    const result = await deleteSharedSessionById(sessionId);
+    if (!result.ok) {
+      const status = result.notFound ? 404 : 400;
+      sendJson(res, status, {
+        ok: false,
+        error: result.error || "Failed to delete session"
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      ok: true,
+      deletedId: result.id,
+      deletedFiles: result.deletedFiles,
+      wroteSessionIndex: result.wroteSessionIndex,
+      wroteGlobalState: result.wroteGlobalState,
+      message: `已物理删除会话：${result.title}（清理 ${result.deletedFiles} 个本地文件）`
+    });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/session/reveal") {
+    const body = await parseBody(req);
+    const session = await findSharedSessionById(body.id);
+    if (!session) {
+      sendJson(res, 404, { ok: false, error: "Session not found" });
+      return;
+    }
+
+    const rolloutPath = typeof session.rolloutPath === "string" ? session.rolloutPath.trim() : "";
+    const cwdPath = typeof session.cwd === "string" ? session.cwd.trim() : "";
+    let targetPath = "";
+    let revealMode = false;
+
+    if (rolloutPath && isHomeRelativePath(rolloutPath) && await pathExists(rolloutPath)) {
+      targetPath = rolloutPath;
+      revealMode = true;
+    } else if (cwdPath && isHomeRelativePath(cwdPath) && await pathExists(cwdPath)) {
+      targetPath = cwdPath;
+    }
+
+    if (!targetPath) {
+      sendJson(res, 400, { ok: false, error: "No local file path found for this session" });
+      return;
+    }
+
+    const result = await openMacTarget(revealMode ? ["-R", targetPath] : [targetPath]);
+    sendJson(res, result.ok ? 200 : 500, {
+      ok: result.ok,
+      message: result.ok
+        ? (revealMode ? "已在 Finder 中定位到会话文件" : "已打开会话目录")
+        : result.message
+    });
     return;
   }
 

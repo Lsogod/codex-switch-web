@@ -264,11 +264,12 @@ function getUsageSummary(usage) {
     return { title: "额度异常", meta: "当前账号未返回额度信息", percent: null, tone: "warn" };
   }
   const percent = clampPercent(data.summary.remainingPercent);
+  const blocked = data.blocked === true || data.summary.blocked === true || percent <= 0;
   return {
-    title: `${getUsageStatusLabel(percent)} · ${percent}%`,
-    meta: [data.summary.label, formatResetLabel(data.summary.resetAt)].filter(Boolean).join(" · "),
+    title: `${blocked ? "当前不可用" : getUsageStatusLabel(percent)} · ${percent}%`,
+    meta: [data.summary.label, formatResetLabel(data.summary.resetAt), data.summary.note].filter(Boolean).join(" · "),
     percent,
-    tone: getUsageTone(percent)
+    tone: blocked ? "danger" : getUsageTone(percent)
   };
 }
 

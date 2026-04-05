@@ -181,6 +181,118 @@ function createTrayIcon() {
   return image.resize({ width: 18, height: 18 });
 }
 
+const PLUS_WEEKLY_ALERT_THRESHOLD = 10;
+
+function clampMenuPercent(value) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function getMenuUsageWindows(usageData) {
+  return [usageData?.primary, usageData?.secondary].filter(
+    (windowInfo) => windowInfo && windowInfo.remainingPercent != null
+  );
+}
+
+function isWeeklyMenuWindow(windowInfo) {
+  if (!windowInfo) {
+    return false;
+  }
+  if (Number.isFinite(windowInfo.windowDurationMins) && windowInfo.windowDurationMins >= (6 * 24 * 60)) {
+    return true;
+  }
+  return /week/i.test(String(windowInfo.label || ""));
+}
+
+function compareMenuWindows(a, b) {
+  const remainingA = clampMenuPercent(a?.remainingPercent);
+  const remainingB = clampMenuPercent(b?.remainingPercent);
+  if (remainingA == null && remainingB == null) {
+    return 0;
+  }
+  if (remainingA == null) {
+    return 1;
+  }
+  if (remainingB == null) {
+    return -1;
+  }
+  if (remainingA !== remainingB) {
+    return remainingA - remainingB;
+  }
+
+  const resetA = a?.resetAt ? new Date(a.resetAt).getTime() : Number.POSITIVE_INFINITY;
+  const resetB = b?.resetAt ? new Date(b.resetAt).getTime() : Number.POSITIVE_INFINITY;
+  if (resetA !== resetB) {
+    return resetA - resetB;
+  }
+
+  const durationA = Number.isFinite(a?.windowDurationMins) ? a.windowDurationMins : 0;
+  const durationB = Number.isFinite(b?.windowDurationMins) ? b.windowDurationMins : 0;
+  return durationB - durationA;
+}
+
+function getMenuWindowLabel(windowInfo) {
+  if (!windowInfo) {
+    return null;
+  }
+  if (isWeeklyMenuWindow(windowInfo)) {
+    return "周额度";
+  }
+
+  const minutes = Number.isFinite(windowInfo.windowDurationMins) ? windowInfo.windowDurationMins : null;
+  if (minutes != null && minutes >= 60) {
+    return `${Math.round(minutes / 60)}小时`;
+  }
+  if (minutes != null && minutes > 0) {
+    return `${minutes}分钟`;
+  }
+  return String(windowInfo.label || "").trim() || null;
+}
+
+function resolveMenuUsageState(profile, previousProfile) {
+  const usageData = profile?.usage?.data || null;
+  const windows = getMenuUsageWindows(usageData);
+  const weeklyWindow = windows.find((windowInfo) => isWeeklyMenuWindow(windowInfo)) || null;
+  const shortWindow = windows
+    .filter((windowInfo) => !isWeeklyMenuWindow(windowInfo))
+    .sort(compareMenuWindows)[0] || null;
+  const fallbackWindow = windows.sort(compareMenuWindows)[0] || null;
+  const planType = String(profile?.planType || usageData?.planType || "").toLowerCase();
+  let selectedWindow = fallbackWindow;
+
+  if (planType === "plus" && weeklyWindow && shortWindow) {
+    const weeklyRemaining = clampMenuPercent(weeklyWindow.remainingPercent);
+    selectedWindow = weeklyRemaining != null && weeklyRemaining <= PLUS_WEEKLY_ALERT_THRESHOLD
+      ? weeklyWindow
+      : shortWindow;
+  }
+
+  const summaryWindow = usageData?.summary || null;
+  const remainingPercent =
+    clampMenuPercent(selectedWindow?.remainingPercent) ??
+    clampMenuPercent(profile?.priority?.remainingPercent) ??
+    clampMenuPercent(summaryWindow?.remainingPercent) ??
+    previousProfile?.remainingPercent ??
+    null;
+  const resetAt =
+    selectedWindow?.resetAt ||
+    profile?.priority?.resetAt ||
+    summaryWindow?.resetAt ||
+    previousProfile?.resetAt ||
+    null;
+  const blocked = profile?.usage?.data?.blocked === true
+    || profile?.priority?.usable === false
+    || remainingPercent === 0;
+
+  return {
+    remainingPercent,
+    resetAt,
+    blocked
+  };
+}
+
 function formatMenuResetAt(value) {
   if (!value) {
     return "重置未知";
@@ -597,23 +709,20 @@ async function updateMenuProfilesSnapshot() {
       const state = await getLocalJson("/api/state");
       const previousByName = new Map(menuProfilesSnapshot.map((profile) => [profile.profileName, profile]));
       menuProfilesSnapshot = Array.isArray(state?.profiles)
-        ? state.profiles.map((profile) => ({
-            ...(previousByName.get(profile.profileName) || {}),
-            profileName: profile.profileName,
-            active: profile.active === true,
-            planType: profile.planType || profile.usage?.data?.planType || null,
-            remainingPercent:
-              profile.priority?.remainingPercent ??
-              profile.usage?.data?.summary?.remainingPercent ??
-              previousByName.get(profile.profileName)?.remainingPercent ??
-              null,
-            resetAt:
-              profile.priority?.resetAt ||
-              profile.usage?.data?.summary?.resetAt ||
-              previousByName.get(profile.profileName)?.resetAt ||
-              null,
-            issue: profile.usage?.issue?.message || (profile.usage?.ok === false ? (profile.usage?.error || "额度异常") : null)
-          }))
+        ? state.profiles.map((profile) => {
+            const previousProfile = previousByName.get(profile.profileName) || {};
+            const usageState = resolveMenuUsageState(profile, previousProfile);
+            return {
+              ...previousProfile,
+              profileName: profile.profileName,
+              active: profile.active === true,
+              planType: profile.planType || profile.usage?.data?.planType || null,
+              remainingPercent: usageState.remainingPercent,
+              resetAt: usageState.resetAt,
+              blocked: usageState.blocked,
+              issue: profile.usage?.issue?.message || (profile.usage?.ok === false ? (profile.usage?.error || "额度异常") : null)
+            };
+          })
         : [];
       menuProfilesError = null;
     } catch (error) {

@@ -561,6 +561,60 @@ function normalizeUsageWindow(window, fallbackName = null) {
   };
 }
 
+function compareUsageWindowsByConstraint(a, b) {
+  const remainingA = clampPercent(a?.remainingPercent);
+  const remainingB = clampPercent(b?.remainingPercent);
+  if (remainingA == null && remainingB == null) {
+    return 0;
+  }
+  if (remainingA == null) {
+    return 1;
+  }
+  if (remainingB == null) {
+    return -1;
+  }
+  if (remainingA !== remainingB) {
+    return remainingA - remainingB;
+  }
+
+  const resetA = toTimestamp(a?.resetAt);
+  const resetB = toTimestamp(b?.resetAt);
+  if (Number.isFinite(resetA) && Number.isFinite(resetB) && resetA !== resetB) {
+    return resetA - resetB;
+  }
+  if (Number.isFinite(resetA) !== Number.isFinite(resetB)) {
+    return Number.isFinite(resetA) ? -1 : 1;
+  }
+
+  const durationA = Number.isFinite(a?.windowDurationMins) ? a.windowDurationMins : Number.NEGATIVE_INFINITY;
+  const durationB = Number.isFinite(b?.windowDurationMins) ? b.windowDurationMins : Number.NEGATIVE_INFINITY;
+  if (durationA !== durationB) {
+    return durationB - durationA;
+  }
+
+  return String(a?.label || "").localeCompare(String(b?.label || ""));
+}
+
+function buildUsageSummary(windows, blocked = false) {
+  const candidates = Array.isArray(windows)
+    ? windows.filter((window) => window && window.remainingPercent != null)
+    : [];
+  if (!candidates.length) {
+    return null;
+  }
+
+  const limitingWindow = [...candidates].sort(compareUsageWindowsByConstraint)[0];
+  const remainingPercent = clampPercent(limitingWindow.remainingPercent);
+  return {
+    ...limitingWindow,
+    remainingPercent,
+    blocked: blocked || remainingPercent === 0,
+    aggregate: candidates.length > 1,
+    windowCount: candidates.length,
+    note: candidates.length > 1 ? "按最紧限制窗口汇总" : null
+  };
+}
+
 function normalizeUsageResponse(usage) {
   if (!usage || typeof usage !== "object") {
     return null;
@@ -590,16 +644,25 @@ function normalizeUsageResponse(usage) {
         balance: Number.isFinite(usage.credits.balance) ? usage.credits.balance : null
       }
     : null;
+  const mainWindows = [primary, secondary].filter(Boolean);
+  const blocked = usage.rate_limit?.limit_reached === true
+    || usage.rate_limit?.allowed === false
+    || mainWindows.some((window) => clampPercent(window.remainingPercent) === 0);
+  const summary = buildUsageSummary(mainWindows, blocked)
+    || buildUsageSummary([
+      codeReview,
+      ...additionalLimits.flatMap((entry) => [entry.primary, entry.secondary])
+    ]);
 
   return {
     planType: usage.plan_type || null,
-    blocked: usage.rate_limit?.limit_reached === true || usage.rate_limit?.allowed === false,
+    blocked,
     primary,
     secondary,
     codeReview,
     additionalLimits,
     credits,
-    summary: primary || secondary || codeReview || additionalLimits[0]?.primary || null
+    summary
   };
 }
 
@@ -796,7 +859,7 @@ function buildUsagePriority(usage, now = Date.now()) {
     : null;
   const stale = fetchedAgeSeconds == null || fetchedAgeSeconds > 45;
   const credits = usage.data?.credits;
-  const blocked = usage.data?.blocked === true || remainingPercent <= 0;
+  const blocked = usage.data?.blocked === true || summary.blocked === true || remainingPercent <= 0;
   const depletionPriority = 100 - remainingPercent;
   const resetPriority = Number.isFinite(resetInHours)
     ? Math.max(0, 168 - Math.min(resetInHours, 168)) / 168 * 100
@@ -819,7 +882,13 @@ function buildUsagePriority(usage, now = Date.now()) {
     label = "可优先";
   }
 
-  const reasonParts = [`剩余 ${remainingPercent}%`, formatDurationLabel(resetAtMs == null ? NaN : resetAtMs - now), formatAgeLabel(fetchedAgeSeconds)];
+  const reasonParts = [
+    summary.label || null,
+    summary.note || null,
+    `剩余 ${remainingPercent}%`,
+    formatDurationLabel(resetAtMs == null ? NaN : resetAtMs - now),
+    formatAgeLabel(fetchedAgeSeconds)
+  ].filter(Boolean);
   if (!blocked) {
     reasonParts.push("优先消耗更早重置的账号，其次处理剩余更少的账号");
   }

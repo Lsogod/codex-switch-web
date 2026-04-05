@@ -20,6 +20,7 @@ let updateState = {
 };
 let lastRenderableUsage = null;
 let dismissedUsageNoticeKey = null;
+const PLUS_WEEKLY_ALERT_THRESHOLD = 10;
 
 function clampPercent(value) {
   if (!Number.isFinite(value)) return 0;
@@ -40,25 +41,101 @@ function getUsageLabel(percent) {
   return "充足";
 }
 
+function getOverlayWindows(usage) {
+  if (!usage || usage.ok === false || !usage.data) {
+    return [];
+  }
+  return [usage.data.primary, usage.data.secondary].filter(
+    (windowInfo) => windowInfo && windowInfo.remainingPercent != null
+  );
+}
+
+function isWeeklyWindow(windowInfo) {
+  if (!windowInfo) return false;
+  if (Number.isFinite(windowInfo.windowDurationMins) && windowInfo.windowDurationMins >= (6 * 24 * 60)) {
+    return true;
+  }
+  return /week/i.test(String(windowInfo.label || ""));
+}
+
+function compareOverlayWindows(a, b) {
+  const remainingA = clampPercent(a?.remainingPercent);
+  const remainingB = clampPercent(b?.remainingPercent);
+  if (remainingA !== remainingB) {
+    return remainingA - remainingB;
+  }
+
+  const resetA = a?.resetAt ? new Date(a.resetAt).getTime() : Number.POSITIVE_INFINITY;
+  const resetB = b?.resetAt ? new Date(b.resetAt).getTime() : Number.POSITIVE_INFINITY;
+  if (resetA !== resetB) {
+    return resetA - resetB;
+  }
+
+  const durationA = Number.isFinite(a?.windowDurationMins) ? a.windowDurationMins : 0;
+  const durationB = Number.isFinite(b?.windowDurationMins) ? b.windowDurationMins : 0;
+  return durationB - durationA;
+}
+
+function getOverlayWindowLabel(windowInfo) {
+  if (!windowInfo) return "额度";
+  if (isWeeklyWindow(windowInfo)) return "周额度";
+
+  const minutes = Number.isFinite(windowInfo.windowDurationMins) ? windowInfo.windowDurationMins : null;
+  if (minutes != null && minutes >= 60) {
+    const hours = Math.round(minutes / 60);
+    return `${hours}小时`;
+  }
+  if (minutes != null && minutes > 0) {
+    return `${minutes}分钟`;
+  }
+  return String(windowInfo.label || "额度");
+}
+
+function pickOverlayWindow(usage) {
+  const windows = getOverlayWindows(usage);
+  if (!windows.length) {
+    return usage?.data?.summary || null;
+  }
+
+  const weeklyWindow = windows.find((windowInfo) => isWeeklyWindow(windowInfo)) || null;
+  const shortWindow = windows
+    .filter((windowInfo) => !isWeeklyWindow(windowInfo))
+    .sort(compareOverlayWindows)[0] || null;
+  const planType = String(usage?.data?.planType || "").toLowerCase();
+
+  if (planType === "plus" && weeklyWindow && shortWindow) {
+    const weeklyRemaining = clampPercent(weeklyWindow.remainingPercent);
+    if (weeklyRemaining <= PLUS_WEEKLY_ALERT_THRESHOLD) {
+      return weeklyWindow;
+    }
+    return shortWindow;
+  }
+
+  return [...windows].sort(compareOverlayWindows)[0];
+}
+
 function getUsageSummary(usage) {
   if (!usage) {
-    return { percent: null, tone: "warn", resetAt: null, issue: "还没有拿到额度数据" };
+    return { percent: null, tone: "warn", resetAt: null, issue: "还没有拿到额度数据", blocked: false, label: "额度" };
   }
   if (usage.ok === false) {
-    return { percent: null, tone: "danger", resetAt: null, issue: usage.error || "额度读取失败" };
+    return { percent: null, tone: "danger", resetAt: null, issue: usage.error || "额度读取失败", blocked: true, label: "额度" };
   }
 
-  const summary = usage.data?.summary;
-  if (!summary || summary.remainingPercent == null) {
-    return { percent: null, tone: "warn", resetAt: null, issue: "当前账号未返回额度信息" };
+  const windowInfo = pickOverlayWindow(usage);
+  if (!windowInfo || windowInfo.remainingPercent == null) {
+    return { percent: null, tone: "warn", resetAt: null, issue: "当前账号未返回额度信息", blocked: false, label: "额度" };
   }
 
-  const percent = clampPercent(summary.remainingPercent);
+  const percent = clampPercent(windowInfo.remainingPercent);
+  const blocked = usage.data?.blocked === true || windowInfo.blocked === true || percent <= 0;
   return {
     percent,
-    tone: getUsageTone(percent),
-    resetAt: summary.resetAt || null,
-    issue: usage.issue?.message || null
+    tone: blocked ? "danger" : getUsageTone(percent),
+    resetAt: windowInfo.resetAt || null,
+    issue: usage.issue?.message || null,
+    blocked,
+    label: getOverlayWindowLabel(windowInfo)
   };
 }
 
@@ -186,8 +263,8 @@ async function refresh() {
     const activeAccount = state.activeAccount || {};
 
     quotaPercentEl.textContent = usage.percent == null ? "--%" : `${usage.percent}%`;
-    quotaPercentEl.title = usage.percent == null ? (usage.issue || "额度状态未知") : `${getUsageLabel(usage.percent)} · ${usage.percent}%`;
-    quotaLabelEl.textContent = usage.percent == null ? "异常" : getUsageLabel(usage.percent);
+    quotaPercentEl.title = usage.percent == null ? (usage.issue || "额度状态未知") : `${usage.blocked ? "当前不可用" : getUsageLabel(usage.percent)} · ${usage.percent}%`;
+    quotaLabelEl.textContent = usage.percent == null ? "异常" : (usage.blocked ? "不可用" : getUsageLabel(usage.percent));
     quotaLabelEl.title = usage.issue || quotaLabelEl.textContent;
     resetTimeEl.textContent = formatResetTime(usage.resetAt);
     resetTimeEl.title = usage.issue ? `${usage.issue} · 重置 ${formatResetTime(usage.resetAt)}` : `重置 ${formatResetTime(usage.resetAt)}`;

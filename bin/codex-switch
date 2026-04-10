@@ -249,12 +249,10 @@ list_profiles() {
   for path in "${paths[@]}"; do
     [[ -d "$path" ]] || continue
     count=$((count + 1))
-    local name
-    name="$(basename "$path")"
-    if [[ "$name" == "$active" ]]; then
-      print -- "* $name"
+    if [[ "${path:t}" == "$active" ]]; then
+      print -- "* ${path:t}"
     else
-      print -- "  $name"
+      print -- "  ${path:t}"
     fi
   done
   if (( count == 0 )); then

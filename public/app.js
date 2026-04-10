@@ -3,6 +3,7 @@ const profilesDirEl = document.querySelector("#profilesDir");
 const profilesGridEl = document.querySelector("#profilesGrid");
 const toastEl = document.querySelector("#toast");
 const profileTemplate = document.querySelector("#profileTemplate");
+const warningsPanelEl = document.querySelector("#warningsPanel");
 const loginStatusEl = document.querySelector("#loginStatus");
 const activeAccountEmailEl = document.querySelector("#activeAccountEmail");
 const activeUsageTitleEl = document.querySelector("#activeUsageTitle");
@@ -17,6 +18,7 @@ const installUpdateButtonEl = document.querySelector("#installUpdateButton");
 let autoRegisterInFlight = false;
 let versionLoadInFlight = false;
 let appVersionState = null;
+let warningProfiles = new Set();
 const expandedProfiles = new Set();
 
 async function api(path, options = {}) {
@@ -366,6 +368,10 @@ function renderProfiles(profiles) {
     const planLabel = String(profile.planType || "-");
     const planTone = planLabel.trim().toLowerCase();
 
+    if (warningProfiles.has(profile.profileName)) {
+      node.classList.add("has-warning");
+    }
+
     // Strip bar info
     node.querySelector(".profile-name").textContent = profile.profileName;
     node.querySelector(".profile-email").textContent = profile.email || "未检测到邮箱";
@@ -461,6 +467,60 @@ function renderProfiles(profiles) {
   }
 }
 
+function renderWarnings(warnings = []) {
+  warningsPanelEl.innerHTML = "";
+  warningProfiles = new Set();
+
+  if (!Array.isArray(warnings) || warnings.length === 0) {
+    warningsPanelEl.classList.add("hidden");
+    return;
+  }
+
+  warningsPanelEl.classList.remove("hidden");
+
+  for (const warning of warnings) {
+    for (const profileName of warning.profiles || []) {
+      warningProfiles.add(profileName);
+    }
+
+    const card = document.createElement("article");
+    card.className = `warning-card ${warning.severity === "info" ? "is-info" : "is-warn"}`;
+
+    const title = document.createElement("strong");
+    title.className = "warning-title";
+    title.textContent = warning.title || "检测到 profile 异常";
+    card.appendChild(title);
+
+    const message = document.createElement("p");
+    message.className = "warning-message";
+    message.textContent = warning.message || "请检查当前 profile 配置。";
+    card.appendChild(message);
+
+    const chips = document.createElement("div");
+    chips.className = "warning-chips";
+
+    for (const profileName of warning.profiles || []) {
+      const chip = document.createElement("span");
+      chip.className = "warning-chip";
+      chip.textContent = warning.active && profileName === activeProfileEl.textContent
+        ? `${profileName} · 当前`
+        : profileName;
+      chips.appendChild(chip);
+    }
+
+    if (chips.childElementCount > 0) {
+      card.appendChild(chips);
+    }
+
+    const hint = document.createElement("small");
+    hint.className = "warning-hint";
+    hint.textContent = "建议使用“CLI 登录”或“设备码登录”创建新账号 profile，确认无用后再删除重复项。";
+    card.appendChild(hint);
+
+    warningsPanelEl.appendChild(card);
+  }
+}
+
 async function ensureCodexReady(actionLabel) {
   const processState = await api("/api/codex/processes");
   if (!processState.hasBlockingProcesses) return true;
@@ -501,6 +561,7 @@ async function loadState() {
   activeUsageMeterBarEl.dataset.tone = activeUsageSummary.tone;
 
   renderAutoSwitch(state.autoSwitch);
+  renderWarnings(state.warnings);
   renderProfiles(state.profiles);
   return state;
 }

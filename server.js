@@ -238,6 +238,105 @@ function extractProfileMeta(auth) {
   };
 }
 
+function normalizeComparableText(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized || null;
+}
+
+function looksLikeEmail(value) {
+  return typeof value === "string" && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value.trim());
+}
+
+function getProfileIdentity(profile) {
+  const accountId = typeof profile?.accountId === "string" && profile.accountId.trim()
+    ? profile.accountId.trim()
+    : null;
+  const email = normalizeComparableText(profile?.email);
+
+  if (accountId) {
+    return {
+      key: `account:${accountId}`,
+      accountId,
+      email
+    };
+  }
+
+  if (email) {
+    return {
+      key: `email:${email}`,
+      accountId: null,
+      email
+    };
+  }
+
+  return null;
+}
+
+function buildProfileWarnings(profiles, activeProfile) {
+  if (!Array.isArray(profiles) || profiles.length === 0) {
+    return [];
+  }
+
+  const warnings = [];
+  const identityGroups = new Map();
+
+  for (const profile of profiles) {
+    const identity = getProfileIdentity(profile);
+    if (identity) {
+      if (!identityGroups.has(identity.key)) {
+        identityGroups.set(identity.key, {
+          ...identity,
+          profiles: []
+        });
+      }
+      identityGroups.get(identity.key).profiles.push(profile.profileName);
+    }
+
+    const normalizedProfileName = normalizeComparableText(profile.profileName);
+    const normalizedEmail = normalizeComparableText(profile.email);
+    if (looksLikeEmail(profile.profileName) && normalizedEmail && normalizedProfileName !== normalizedEmail) {
+      warnings.push({
+        kind: "profile-email-mismatch",
+        severity: profile.profileName === activeProfile ? "warn" : "info",
+        title: `Profile 名和当前账号不一致: ${profile.profileName}`,
+        message: `${profile.profileName} 当前解析为 ${profile.email}。这通常表示该已保存 profile 曾在原位重新登录，导致原账号被覆盖。`,
+        profileName: profile.profileName,
+        actualEmail: profile.email,
+        profiles: [profile.profileName],
+        active: profile.profileName === activeProfile
+      });
+    }
+  }
+
+  for (const identityGroup of identityGroups.values()) {
+    if (identityGroup.profiles.length < 2) {
+      continue;
+    }
+
+    const label = identityGroup.email || "同一账号";
+    const profilesList = [...identityGroup.profiles].sort();
+    warnings.push({
+      kind: "duplicate-account",
+      severity: profilesList.includes(activeProfile) ? "warn" : "info",
+      title: `多个 profile 指向同一账号: ${label}`,
+      message: "这些 profile 的本地凭据解析到了同一个账号。通常表示某个已保存 profile 在登录新账号时被覆盖了。",
+      email: identityGroup.email,
+      profiles: profilesList,
+      active: profilesList.includes(activeProfile)
+    });
+  }
+
+  return warnings.sort((left, right) => {
+    const leftWeight = left.severity === "warn" ? 0 : 1;
+    const rightWeight = right.severity === "warn" ? 0 : 1;
+    return leftWeight - rightWeight || left.title.localeCompare(right.title, "zh-CN");
+  });
+}
+
 function normalizeVersion(value) {
   return String(value || "")
     .trim()
@@ -1787,6 +1886,7 @@ async function getProfilesState() {
     profilesDir: PROFILES_DIR,
     activeCodexDir: ACTIVE_CODEX_DIR,
     profiles: profilesWithPriority,
+    warnings: buildProfileWarnings(profilesWithPriority, activeProfile),
     recommendedProfile: recommendedProfile
       ? {
           profileName: recommendedProfile.profileName,

@@ -10,7 +10,7 @@ const execFileAsync = promisify(execFile);
 const CODEX_DIR = path.join(os.homedir(), ".codex");
 const PROFILES_DIR = path.join(os.homedir(), ".codex-profiles");
 const PROFILE_FILES = ["auth.json", "config.toml", "AGENTS.md", "models_cache.json"];
-const PROFILE_DIRS = ["rules"];
+const PROFILE_DIRS = ["rules", "pets"];
 const VALID_NAME_RE = /^[A-Za-z0-9._@+-]+$/;
 
 function usage() {
@@ -235,7 +235,9 @@ async function newProfile(name, force) {
   for (const item of ["config.toml", "AGENTS.md"]) {
     await copyIfExists(path.join(src, item), path.join(dest, item));
   }
-  await copyIfExists(path.join(src, "rules"), path.join(dest, "rules"));
+  for (const item of PROFILE_DIRS) {
+    await copyIfExists(path.join(src, item), path.join(dest, item));
+  }
 
   return [`Created fresh profile: ${dest}`, `Next: codex-switch use ${name}`].join("\n");
 }

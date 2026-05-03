@@ -19,13 +19,18 @@ const LOCAL_CODEX_SWITCH = path.join(os.homedir(), ".local", "bin", "codex-switc
 const PROFILES_DIR = path.join(os.homedir(), ".codex-profiles");
 const ACTIVE_CODEX_DIR = path.join(os.homedir(), ".codex");
 const SHARED_SESSIONS_DIR = path.join(PROFILES_DIR, ".shared-sessions");
+const SHARED_PETS_DIR = path.join(PROFILES_DIR, ".shared-pets");
 const SHARED_GLOBAL_STATE_PATH = path.join(PROFILES_DIR, ".shared-global-state.json");
-const CODEX_APP_SUPPORT_DIR = getCodexAppSupportDir();
+const CODEX_APP_SUPPORT_DIRS = getCodexAppSupportDirs();
 const CODEX_CACHE_RESET_ITEMS = [
   "Local Storage",
   "Session Storage",
   "Cache",
-  "Code Cache"
+  "Code Cache",
+  path.join("Partitions", "codex-browser-app", "Local Storage"),
+  path.join("Partitions", "codex-browser-app", "Session Storage"),
+  path.join("Partitions", "codex-browser-app", "Cache"),
+  path.join("Partitions", "codex-browser-app", "Code Cache")
 ];
 const PROCESS_POLL_ATTEMPTS = 12;
 const PROCESS_POLL_DELAY_MS = 500;
@@ -55,11 +60,15 @@ const SHARED_SESSION_FILES = [
   "state_5.sqlite-wal",
   "logs_1.sqlite",
   "logs_1.sqlite-shm",
-  "logs_1.sqlite-wal"
+  "logs_1.sqlite-wal",
+  "logs_2.sqlite",
+  "logs_2.sqlite-shm",
+  "logs_2.sqlite-wal"
 ];
 const SQLITE_SESSION_DATABASES = [
   { baseName: "state_5.sqlite", kind: "state" },
-  { baseName: "logs_1.sqlite", kind: "logs" }
+  { baseName: "logs_1.sqlite", kind: "logs" },
+  { baseName: "logs_2.sqlite", kind: "logs" }
 ];
 const SHARED_SESSION_ITEMS = [...SHARED_SESSION_DIRS, ...SHARED_SESSION_FILES];
 const AUTO_SWITCH_STATE_FILE = path.join(PROFILES_DIR, ".auto-switch.json");
@@ -121,14 +130,42 @@ function getWindowsLocalAppDataDir() {
   return process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
 }
 
-function getCodexAppSupportDir() {
+function getWindowsPackagedCodexAppSupportDirs() {
+  const packagesDir = path.join(getWindowsLocalAppDataDir(), "Packages");
+  try {
+    return fs.readdirSync(packagesDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^OpenAI\.Codex_/i.test(entry.name))
+      .map((entry) => path.join(packagesDir, entry.name, "LocalCache", "Roaming", "Codex"));
+  } catch {
+    return [];
+  }
+}
+
+function uniquePaths(paths) {
+  const seen = new Set();
+  const result = [];
+  for (const itemPath of paths) {
+    if (!itemPath || seen.has(itemPath)) {
+      continue;
+    }
+    seen.add(itemPath);
+    result.push(itemPath);
+  }
+  return result;
+}
+
+function getCodexAppSupportDirs() {
   if (process.platform === "win32") {
-    return path.join(getWindowsRoamingAppDataDir(), "Codex");
+    return uniquePaths([
+      path.join(getWindowsRoamingAppDataDir(), "Codex"),
+      path.join(getWindowsLocalAppDataDir(), "OpenAI", "Codex"),
+      ...getWindowsPackagedCodexAppSupportDirs()
+    ]);
   }
   if (process.platform === "darwin") {
-    return path.join(os.homedir(), "Library", "Application Support", "Codex");
+    return [path.join(os.homedir(), "Library", "Application Support", "Codex")];
   }
-  return path.join(os.homedir(), ".config", "Codex");
+  return [path.join(os.homedir(), ".config", "Codex")];
 }
 
 function getUpdaterLogPath() {
@@ -2512,7 +2549,6 @@ async function deleteSharedSessionById(sessionId) {
   }
 
   const stateDbPath = path.join(SHARED_SESSIONS_DIR, "state_5.sqlite");
-  const logsDbPath = path.join(SHARED_SESSIONS_DIR, "logs_1.sqlite");
   const sessionIndexPath = path.join(SHARED_SESSIONS_DIR, "session_index.jsonl");
   const threadIdLiteral = sqlLiteral(normalizedId);
 
@@ -2532,14 +2568,20 @@ async function deleteSharedSessionById(sessionId) {
     await execFileAsync("sqlite3", [stateDbPath, deleteScript]);
   }
 
-  if (await pathExists(logsDbPath)) {
-    const deleteLogsScript = [
-      "BEGIN IMMEDIATE;",
-      `DELETE FROM logs WHERE thread_id = ${threadIdLiteral};`,
-      "COMMIT;",
-      "PRAGMA wal_checkpoint(TRUNCATE);"
-    ].join("\n");
-    await execFileAsync("sqlite3", [logsDbPath, deleteLogsScript]);
+  for (const { baseName, kind } of SQLITE_SESSION_DATABASES) {
+    if (kind !== "logs") {
+      continue;
+    }
+    const logsDbPath = path.join(SHARED_SESSIONS_DIR, baseName);
+    if (await pathExists(logsDbPath)) {
+      const deleteLogsScript = [
+        "BEGIN IMMEDIATE;",
+        `DELETE FROM logs WHERE thread_id = ${threadIdLiteral};`,
+        "COMMIT;",
+        "PRAGMA wal_checkpoint(TRUNCATE);"
+      ].join("\n");
+      await execFileAsync("sqlite3", [logsDbPath, deleteLogsScript]);
+    }
   }
 
   const rowsMap = await readSessionIndexMap(sessionIndexPath);
@@ -2653,6 +2695,21 @@ async function readLinkRealPath(targetPath) {
   }
 }
 
+async function areSameFilesystemEntry(leftPath, rightPath) {
+  try {
+    const [leftStat, rightStat] = await Promise.all([
+      fsp.stat(leftPath),
+      fsp.stat(rightPath)
+    ]);
+    return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
 async function ensureParentDir(targetPath) {
   await fsp.mkdir(path.dirname(targetPath), { recursive: true });
 }
@@ -2666,6 +2723,28 @@ async function ensureEmptyFile(targetPath) {
   if (!await pathExists(targetPath)) {
     await fsp.writeFile(targetPath, "", "utf8");
   }
+}
+
+async function createSharedPathLink(sharedPath, profilePath, isDirectory) {
+  await ensureParentDir(profilePath);
+  if (isDirectory) {
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    await fsp.symlink(sharedPath, profilePath, linkType);
+    return;
+  }
+
+  if (process.platform === "win32") {
+    try {
+      await fsp.link(sharedPath, profilePath);
+      return;
+    } catch (error) {
+      if (!["EXDEV", "EPERM", "EACCES", "ENOENT"].includes(error.code)) {
+        throw error;
+      }
+    }
+  }
+
+  await fsp.symlink(sharedPath, profilePath, "file");
 }
 
 function getProfileDir(name) {
@@ -2888,39 +2967,107 @@ function sqlLiteral(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-function buildSqliteMergeScript(kind, srcDbPath) {
-  const attach = `ATTACH DATABASE ${sqlLiteral(srcDbPath)} AS src;`;
-  if (kind === "logs") {
-    return [
-      attach,
-      "BEGIN IMMEDIATE;",
-      "INSERT OR IGNORE INTO main._sqlx_migrations SELECT * FROM src._sqlx_migrations;",
-      "INSERT INTO main.logs(ts, ts_nanos, level, target, feedback_log_body, module_path, file, line, thread_id, process_uuid, estimated_bytes)",
-      "SELECT ts, ts_nanos, level, target, feedback_log_body, module_path, file, line, thread_id, process_uuid, estimated_bytes FROM src.logs;",
-      "COMMIT;",
-      "DETACH DATABASE src;",
-      "PRAGMA wal_checkpoint(TRUNCATE);"
-    ].join("\n");
+async function readSqliteTableColumns(dbPath) {
+  const { stdout } = await execFileAsync("sqlite3", [
+    dbPath,
+    "PRAGMA busy_timeout=5000; SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
+  ]);
+  const tableNames = String(stdout || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((name) => name !== "sqlite_sequence");
+  const result = new Map();
+
+  for (const tableName of tableNames) {
+    const pragma = await execFileAsync("sqlite3", [
+      dbPath,
+      `PRAGMA table_info(${sqlIdentifier(tableName)});`
+    ]);
+    const columns = String(pragma.stdout || "")
+      .split("\n")
+      .map((line) => line.trim().split("|")[1])
+      .filter(Boolean);
+    result.set(tableName, columns);
   }
 
+  return result;
+}
+
+function sqlIdentifier(value) {
+  return `"${String(value).replace(/"/g, '""')}"`;
+}
+
+function buildInsertFromCommonColumns(tableName, mainColumnsMap, sourceColumnsMap, { ignore = true } = {}) {
+  const mainColumns = mainColumnsMap.get(tableName);
+  const sourceColumns = sourceColumnsMap.get(tableName);
+  if (!mainColumns || !sourceColumns) {
+    return null;
+  }
+
+  const sourceColumnSet = new Set(sourceColumns);
+  const commonColumns = mainColumns.filter((column) => sourceColumnSet.has(column));
+  if (commonColumns.length === 0) {
+    return null;
+  }
+
+  const table = sqlIdentifier(tableName);
+  const columns = commonColumns.map(sqlIdentifier).join(", ");
   return [
+    `INSERT ${ignore ? "OR IGNORE " : ""}INTO main.${table} (${columns})`,
+    `SELECT ${columns} FROM src.${table};`
+  ].join("\n");
+}
+
+async function buildSqliteMergeScript(kind, sharedDbPath, srcDbPath) {
+  const [mainColumnsMap, sourceColumnsMap] = await Promise.all([
+    readSqliteTableColumns(sharedDbPath),
+    readSqliteTableColumns(srcDbPath)
+  ]);
+  const attach = `ATTACH DATABASE ${sqlLiteral(srcDbPath)} AS src;`;
+  const statements = [
+    "PRAGMA busy_timeout=5000;",
     attach,
-    "BEGIN IMMEDIATE;",
-    "INSERT OR IGNORE INTO main._sqlx_migrations SELECT * FROM src._sqlx_migrations;",
-    "INSERT OR IGNORE INTO main.threads SELECT * FROM src.threads;",
-    "INSERT INTO main.logs(ts, ts_nanos, level, target, message, module_path, file, line, thread_id, process_uuid, estimated_bytes)",
-    "SELECT ts, ts_nanos, level, target, message, module_path, file, line, thread_id, process_uuid, estimated_bytes FROM src.logs;",
-    "INSERT OR IGNORE INTO main.thread_dynamic_tools SELECT * FROM src.thread_dynamic_tools;",
-    "INSERT OR IGNORE INTO main.stage1_outputs SELECT * FROM src.stage1_outputs;",
-    "INSERT OR IGNORE INTO main.jobs SELECT * FROM src.jobs;",
-    "INSERT OR IGNORE INTO main.backfill_state SELECT * FROM src.backfill_state;",
-    "INSERT OR IGNORE INTO main.agent_jobs SELECT * FROM src.agent_jobs;",
-    "INSERT OR IGNORE INTO main.agent_job_items SELECT * FROM src.agent_job_items;",
-    "INSERT OR IGNORE INTO main.thread_spawn_edges SELECT * FROM src.thread_spawn_edges;",
+    "BEGIN IMMEDIATE;"
+  ];
+
+  const migrationInsert = buildInsertFromCommonColumns("_sqlx_migrations", mainColumnsMap, sourceColumnsMap);
+  if (migrationInsert) {
+    statements.push(migrationInsert);
+  }
+
+  const tableNames = kind === "logs"
+    ? ["logs"]
+    : [
+        "threads",
+        "logs",
+        "thread_dynamic_tools",
+        "stage1_outputs",
+        "jobs",
+        "backfill_state",
+        "agent_jobs",
+        "agent_job_items",
+        "thread_spawn_edges",
+        "thread_goals",
+        "device_key_bindings",
+        "remote_control_enrollments"
+      ];
+
+  for (const tableName of tableNames) {
+    const insert = buildInsertFromCommonColumns(tableName, mainColumnsMap, sourceColumnsMap, {
+      ignore: true
+    });
+    if (insert) {
+      statements.push(insert);
+    }
+  }
+
+  statements.push(
     "COMMIT;",
     "DETACH DATABASE src;",
     "PRAGMA wal_checkpoint(TRUNCATE);"
-  ].join("\n");
+  );
+  return statements.join("\n");
 }
 
 async function copyFileIfExists(srcPath, destPath) {
@@ -3022,6 +3169,13 @@ async function mergeSqliteDatabase(sharedBasePath, sourceBasePath, kind) {
     return;
   }
 
+  await checkpointSqliteIfNeeded(sourceBasePath);
+  await checkpointSqliteIfNeeded(sharedBasePath);
+
+  if (await areSameFilesystemEntry(sharedBasePath, sourceBasePath)) {
+    return;
+  }
+
   const sharedRealPath = await readLinkRealPath(sharedBasePath);
   const sourceRealPath = await readLinkRealPath(sourceBasePath);
   if (sharedRealPath && sourceRealPath && sharedRealPath === sourceRealPath) {
@@ -3034,12 +3188,16 @@ async function mergeSqliteDatabase(sharedBasePath, sourceBasePath, kind) {
     return;
   }
 
-  const script = buildSqliteMergeScript(kind, sourceBasePath);
+  const script = await buildSqliteMergeScript(kind, sharedBasePath, sourceBasePath);
   await execFileAsync("sqlite3", [sharedBasePath, script]);
 }
 
 async function mergeSessionIndex(sharedPath, sourcePath) {
   if (!await pathExists(sourcePath)) {
+    return;
+  }
+
+  if (await areSameFilesystemEntry(sharedPath, sourcePath)) {
     return;
   }
 
@@ -3080,7 +3238,11 @@ async function mergeDirectoryInto(sharedDirPath, sourceDirPath) {
   }
 
   await ensureDir(sharedDirPath);
-  await execFileAsync("rsync", ["-a", `${sourceDirPath}/`, `${sharedDirPath}/`]);
+  await fsp.cp(sourceDirPath, sharedDirPath, {
+    recursive: true,
+    force: true,
+    errorOnExist: false
+  });
 }
 
 async function checkpointSqliteIfNeeded(filePath) {
@@ -3102,26 +3264,45 @@ async function checkpointSqliteIfNeeded(filePath) {
 async function linkProfileItemToShared(profileDir, itemName) {
   const profileItemPath = path.join(profileDir, itemName);
   const sharedItemPath = path.join(SHARED_SESSIONS_DIR, itemName);
+  const isDirectory = SHARED_SESSION_DIRS.includes(itemName);
+
+  if (await areSameFilesystemEntry(profileItemPath, sharedItemPath)) {
+    return;
+  }
+
   const profileRealPath = await readLinkRealPath(profileItemPath);
   const sharedRealPath = await readLinkRealPath(sharedItemPath);
   if (profileRealPath && sharedRealPath && profileRealPath === sharedRealPath) {
     return;
   }
 
-  if (SHARED_SESSION_DIRS.includes(itemName)) {
+  if (isDirectory) {
     await ensureDir(sharedItemPath);
   } else if (itemName === "session_index.jsonl") {
     await ensureEmptyFile(sharedItemPath);
   } else {
     await ensureParentDir(sharedItemPath);
+    if (!await pathExists(sharedItemPath)) {
+      if (!await pathExists(profileItemPath)) {
+        return;
+      }
+      await copyFileIfExists(profileItemPath, sharedItemPath);
+    }
   }
 
   // Flush any pending WAL data before removing the original file
   await checkpointSqliteIfNeeded(profileItemPath);
   await checkpointSqliteIfNeeded(sharedItemPath);
 
-  await fsp.rm(profileItemPath, { recursive: true, force: true });
-  await fsp.symlink(sharedItemPath, profileItemPath);
+  try {
+    await fsp.rm(profileItemPath, { recursive: true, force: true });
+    await createSharedPathLink(sharedItemPath, profileItemPath, isDirectory);
+  } catch (error) {
+    if (["EBUSY", "EPERM", "EACCES"].includes(error.code) && /(?:\.sqlite|\.sqlite-shm|\.sqlite-wal)$/.test(itemName)) {
+      return;
+    }
+    throw error;
+  }
 }
 
 async function linkProfileGlobalStateToShared(profileDir) {
@@ -3137,7 +3318,30 @@ async function linkProfileGlobalStateToShared(profileDir) {
   }
 
   await fsp.rm(profileStatePath, { recursive: true, force: true });
-  await fsp.symlink(SHARED_GLOBAL_STATE_PATH, profileStatePath);
+  await createSharedPathLink(SHARED_GLOBAL_STATE_PATH, profileStatePath, false);
+}
+
+async function syncPetsFromDir(sourceDir) {
+  await mergeDirectoryInto(SHARED_PETS_DIR, path.join(sourceDir, "pets"));
+}
+
+async function linkProfilePetsToShared(profileDir) {
+  const profilePetsPath = path.join(profileDir, "pets");
+
+  if (await areSameFilesystemEntry(profilePetsPath, SHARED_PETS_DIR)) {
+    return;
+  }
+
+  const profileRealPath = await readLinkRealPath(profilePetsPath);
+  const sharedRealPath = await readLinkRealPath(SHARED_PETS_DIR);
+  if (profileRealPath && sharedRealPath && profileRealPath === sharedRealPath) {
+    return;
+  }
+
+  await ensureDir(SHARED_PETS_DIR);
+  await syncPetsFromDir(profileDir);
+  await fsp.rm(profilePetsPath, { recursive: true, force: true });
+  await createSharedPathLink(SHARED_PETS_DIR, profilePetsPath, true);
 }
 
 async function syncSessionArtifactsFromDir(sourceDir) {
@@ -3177,6 +3381,7 @@ async function syncGlobalStateFromDir(sourceDir) {
 async function ensureSharedSessionsLayout(targetProfileName) {
   await ensureDir(PROFILES_DIR);
   await ensureDir(SHARED_SESSIONS_DIR);
+  await ensureDir(SHARED_PETS_DIR);
 
   const activeProfile = await readCurrentProfile();
   const profileNames = await listProfileNames();
@@ -3192,12 +3397,14 @@ async function ensureSharedSessionsLayout(targetProfileName) {
   if (["missing", "unknown", "unmanaged", "external-link"].includes(activeProfile) && await pathExists(ACTIVE_CODEX_DIR)) {
     await syncSessionArtifactsFromDir(ACTIVE_CODEX_DIR);
     await syncGlobalStateFromDir(ACTIVE_CODEX_DIR);
+    await syncPetsFromDir(ACTIVE_CODEX_DIR);
   }
 
   for (const profileName of profileNames) {
     const profileDir = getProfileDir(profileName);
     await syncSessionArtifactsFromDir(profileDir);
     await syncGlobalStateFromDir(profileDir);
+    await syncPetsFromDir(profileDir);
   }
 
   for (const profileName of profilesToLink) {
@@ -3205,6 +3412,7 @@ async function ensureSharedSessionsLayout(targetProfileName) {
     if (!await pathExists(profileDir)) {
       continue;
     }
+    await linkProfilePetsToShared(profileDir);
     for (const itemName of SHARED_SESSION_ITEMS) {
       await linkProfileItemToShared(profileDir, itemName);
     }
@@ -3557,8 +3765,34 @@ async function openWindowsCodexApp() {
     }
   }
 
+  const appUserModelId = await getWindowsCodexAppUserModelId();
+  if (appUserModelId) {
+    await execFileAsync("explorer.exe", [`shell:AppsFolder\\${appUserModelId}`]);
+    return { ok: true };
+  }
+
   await execFileAsync("cmd.exe", ["/d", "/s", "/c", "start", "\"\"", "Codex"]);
   return { ok: true };
+}
+
+async function getWindowsCodexAppUserModelId() {
+  try {
+    const psScript = [
+      "Get-StartApps |",
+      "Where-Object { $_.Name -eq 'Codex' -or $_.AppID -match '^OpenAI\\.Codex_' } |",
+      "Select-Object -First 1 -ExpandProperty AppID"
+    ].join(" ");
+    const { stdout } = await execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      psScript
+    ]);
+    return String(stdout || "").trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 async function openTerminalCommand(command) {
@@ -3614,20 +3848,27 @@ async function waitForActiveProfile(expectedProfile) {
 
 function classifyCodexProcess(command) {
   if (process.platform === "win32") {
-    if (/Codex\.exe/i.test(command) || /(^|\\|\/)codex\.exe/i.test(command)) {
+    if (/--type=crashpad-handler/i.test(command)) {
+      return null;
+    }
+
+    if (/\\OpenAI\.Codex_[^\\]+\\app\\Codex\.exe/i.test(command)) {
       return { kind: "desktop", label: "Codex Desktop" };
     }
 
-    if (/(^|\s)codex(\.cmd|\.ps1|\.exe)?(\s|$)/i.test(command) && !/codex-switch/i.test(command) && !/app-server/i.test(command)) {
+    if (/\\OpenAI\.Codex_[^\\]+\\app\\resources\\codex\.exe"?\s+app-server\b/i.test(command)) {
+      return { kind: "desktop-app-server", label: "Codex Desktop app-server" };
+    }
+
+    if (/(^|\s|["'])codex(\.cmd|\.ps1|\.exe)?(["']|\s|$)/i.test(command) && !/codex-switch/i.test(command) && !/app-server/i.test(command)) {
       return { kind: "cli", label: "Codex CLI" };
     }
 
-    if (/\\Microsoft VS Code\\|\\Code\.exe|(^|\s)Code\.exe/i.test(command)) {
+    if ((/\\Microsoft VS Code\\|\\Code\.exe|(^|\s)Code\.exe/i.test(command)) && /(?:^|[\\/])\.codex(?:[\\/]|$)/i.test(command)) {
       return { kind: "vscode-helper", label: "VS Code" };
     }
 
-    const short = command.split(/\s+/)[0]?.split(/[\\/]/).pop() || "Other process";
-    return { kind: "other", label: `${short} using ~/.codex` };
+    return null;
   }
 
   if (/\/Applications\/Codex\.app\/Contents\/MacOS\/Codex(?:\s|$)/.test(command)) {
@@ -3658,11 +3899,10 @@ async function listCodexProcesses() {
   try {
     if (process.platform === "win32") {
       const psScript = [
-        "$homeCodex = [Regex]::Escape((Join-Path $HOME '.codex'))",
         "$items = Get-CimInstance Win32_Process | Where-Object {",
-        "  ($_.Name -match '^(codex|Codex|Code|Code - Insiders|electron)\\.exe$') -or",
-        "  ($_.CommandLine -match 'codex') -or",
-        "  ($_.CommandLine -match $homeCodex)",
+        "  ($_.Name -match '^(codex|Codex|Code|Code - Insiders)\\.exe$') -or",
+        "  ($_.CommandLine -match '\\\\OpenAI\\.Codex_[^\\\\]+\\\\app\\\\') -or",
+        "  ($_.CommandLine -match '(^|[\\\\/\\s\"''])codex(\\.cmd|\\.ps1|\\.exe)?([\"''\\s]|$)')",
         "} | Select-Object ProcessId,Name,CommandLine",
         "$items | ConvertTo-Json -Compress"
       ].join("\n");
@@ -3687,6 +3927,9 @@ async function listCodexProcesses() {
             return null;
           }
           const classification = classifyCodexProcess(command);
+          if (!classification) {
+            return null;
+          }
           return {
             pid,
             command,
@@ -3774,6 +4017,16 @@ async function closeCodexProcesses() {
     }
 
     let remaining = await listCodexProcesses();
+    if (remaining.length > 0) {
+      for (const imageName of ["Codex.exe", "codex.exe"]) {
+        try {
+          await execFileAsync("taskkill.exe", ["/IM", imageName, "/T", "/F"]);
+          actions.push(`taskkill-image-${imageName}`);
+        } catch {}
+      }
+    }
+
+    remaining = await listCodexProcesses();
     for (let attempt = 0; attempt < PROCESS_POLL_ATTEMPTS; attempt += 1) {
       await sleep(PROCESS_POLL_DELAY_MS);
       remaining = await listCodexProcesses();
@@ -3856,32 +4109,38 @@ function sanitizePublicMessage(result) {
 }
 
 async function resetCodexDesktopCaches() {
-  if (!await pathExists(CODEX_APP_SUPPORT_DIR)) {
-    return { ok: true, moved: [] };
-  }
-
-  const backupRoot = path.join(
-    CODEX_APP_SUPPORT_DIR,
-    `.switch-cache-backup-${new Date().toISOString().replace(/[:.]/g, "-")}`
-  );
   const moved = [];
+  const backups = [];
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 
-  for (const itemName of CODEX_CACHE_RESET_ITEMS) {
-    const sourcePath = path.join(CODEX_APP_SUPPORT_DIR, itemName);
-    if (!await pathExists(sourcePath)) {
+  for (const supportDir of CODEX_APP_SUPPORT_DIRS) {
+    if (!await pathExists(supportDir)) {
       continue;
     }
 
-    await ensureDir(backupRoot);
-    const targetPath = path.join(backupRoot, itemName);
-    await ensureParentDir(targetPath);
-    await fsp.rename(sourcePath, targetPath);
-    moved.push(itemName);
+    const backupRoot = path.join(supportDir, `.switch-cache-backup-${stamp}`);
+    for (const itemName of CODEX_CACHE_RESET_ITEMS) {
+      const sourcePath = path.join(supportDir, itemName);
+      if (!await pathExists(sourcePath)) {
+        continue;
+      }
+
+      await ensureDir(backupRoot);
+      const targetPath = path.join(backupRoot, itemName);
+      await ensureParentDir(targetPath);
+      await fsp.rename(sourcePath, targetPath);
+      moved.push(`${supportDir}:${itemName}`);
+    }
+
+    if (await pathExists(backupRoot)) {
+      backups.push(backupRoot);
+    }
   }
 
   return {
     ok: true,
-    backupRoot: moved.length > 0 ? backupRoot : null,
+    backupRoot: backups[0] || null,
+    backupRoots: backups,
     moved
   };
 }

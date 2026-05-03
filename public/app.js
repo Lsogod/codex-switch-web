@@ -15,6 +15,9 @@ const appUpdateStatusEl = document.querySelector("#appUpdateStatus");
 const checkUpdateButtonEl = document.querySelector("#checkUpdateButton");
 const installUpdateButtonEl = document.querySelector("#installUpdateButton");
 const rebuildSidebarButtonEl = document.querySelector("#rebuildSidebarButton");
+const exportAccountsButtonEl = document.querySelector("#exportAccountsButton");
+const importAccountsButtonEl = document.querySelector("#importAccountsButton");
+const importAccountsInputEl = document.querySelector("#importAccountsInput");
 const usageNoticeEl = document.querySelector("#usageNotice");
 const usageNoticeTextEl = document.querySelector("#usageNoticeText");
 const usageNoticeCloseEl = document.querySelector("#usageNoticeClose");
@@ -44,6 +47,18 @@ async function api(path, options = {}) {
     throw new Error(data.error || data.message || "Request failed");
   }
   return data;
+}
+
+function getDownloadFileName(response, fallbackName) {
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {}
+  }
+  const match = disposition.match(/filename="?([^";]+)"?/i);
+  return match?.[1] || fallbackName;
 }
 
 function showToast(message, tone = "info") {
@@ -1066,6 +1081,73 @@ document.querySelector("#startDeviceLoginButton").addEventListener("click", asyn
     showToast(result.message || "已打开终端，请按设备码流程登录", "success");
   } catch (error) {
     showToast(error.message, "error");
+  }
+});
+
+exportAccountsButtonEl?.addEventListener("click", async () => {
+  exportAccountsButtonEl.disabled = true;
+  try {
+    showToast("正在生成账号导出包...", "info");
+    const response = await fetch("/api/auth/export");
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      throw new Error(data?.error || data?.message || "导出账号失败");
+    }
+
+    const blob = await response.blob();
+    const fileName = getDownloadFileName(response, "codex-accounts-for-windows.zip");
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    const profileCount = response.headers.get("X-Codex-Profile-Count");
+    showToast(profileCount ? `已导出 ${profileCount} 个账号 profile` : "账号导出包已生成", "success");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    exportAccountsButtonEl.disabled = false;
+  }
+});
+
+importAccountsButtonEl?.addEventListener("click", () => {
+  importAccountsInputEl?.click();
+});
+
+importAccountsInputEl?.addEventListener("change", async () => {
+  const file = importAccountsInputEl.files?.[0];
+  importAccountsInputEl.value = "";
+  if (!file) return;
+
+  const confirmed = window.confirm(
+    `确定导入这个账号包吗？\n\n${file.name}\n\n导入会覆盖同名 profile 的凭证和配置文件。`
+  );
+  if (!confirmed) return;
+
+  importAccountsButtonEl.disabled = true;
+  try {
+    const ready = await ensureCodexReady("导入账号");
+    if (!ready) return;
+
+    showToast("正在导入账号包...", "info");
+    const response = await fetch("/api/auth/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/zip" },
+      body: await file.arrayBuffer()
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(data?.error || data?.message || "导入账号失败");
+    }
+    showToast(data.message || "账号包已导入", "success");
+    await loadAndMaybeAutoRegister({ silent: true, allowAutoRegister: false });
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    importAccountsButtonEl.disabled = false;
   }
 });
 

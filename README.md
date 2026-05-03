@@ -206,13 +206,32 @@ node .\bin\codex-switch.js --help
 - 重置时间接近时，优先使用剩余额度更少的账号
 - 已经没有额度的账号排在最后
 
-### 5. 启动 Codex
+### 5. 导入和导出账号
+
+控制台工具栏里有：
+
+- `导出账号`
+- `导入账号`
+
+导出的 zip 会包含：
+
+- 当前 `.codex` 登录态
+- `.codex-profiles` 下的全部账号 profile
+- 每个账号的 `auth.json`、`config.toml`、`AGENTS.md`、`models_cache.json`、`rules`
+
+导出包不会包含 session 历史、SQLite 数据库或共享会话库。
+
+在另一台 Windows 11 或 macOS 机器上，可以打开 Codex Switch 后点击 `导入账号`，选择这个 zip。导入前 App 会要求关闭 Codex 相关进程，避免正在运行的 Codex 覆盖本地凭证。
+
+这个 zip 等同账号登录凭证，迁移完成后建议删除。
+
+### 6. 启动 Codex
 
 切换账号后，如果你想直接打开 Codex，可以：
 
 - 在状态栏菜单点击 `启动 Codex`
 
-### 6. 悬浮额度球
+### 7. 悬浮额度球
 
 你可以在状态栏菜单里打开 `显示悬浮额度`。
 
@@ -224,7 +243,7 @@ node .\bin\codex-switch.js --help
 - 右键悬浮球会弹出和状态栏相同的菜单
 - 可以拖动位置
 
-### 7. 开机自启
+### 8. 开机自启
 
 如果你希望它常驻使用，可以在状态栏菜单里打开 `开机自启`。
 

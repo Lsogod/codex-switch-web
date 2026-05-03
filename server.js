@@ -5,6 +5,7 @@ const path = require("path");
 const os = require("os");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
+const AdmZip = require("adm-zip");
 const codexSwitchCore = require("./bin/codex-switch-core");
 
 const execFileAsync = promisify(execFile);
@@ -62,6 +63,9 @@ const SQLITE_SESSION_DATABASES = [
 ];
 const SHARED_SESSION_ITEMS = [...SHARED_SESSION_DIRS, ...SHARED_SESSION_FILES];
 const AUTO_SWITCH_STATE_FILE = path.join(PROFILES_DIR, ".auto-switch.json");
+const AUTH_EXPORT_FILES = ["auth.json", "config.toml", "AGENTS.md", "models_cache.json", "installation_id", "version.json"];
+const AUTH_EXPORT_DIRS = ["rules"];
+const AUTH_IMPORT_MAX_BYTES = 50 * 1024 * 1024;
 const UPDATE_CACHE_TTL_MS = 10 * 60 * 1000;
 const APP_UPDATE_DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000;
 const GITHUB_REPO = "Lsogod/codex-switch-web";
@@ -208,6 +212,26 @@ function parseBody(req) {
   });
 }
 
+function parseRawBody(req, { limitBytes = AUTH_IMPORT_MAX_BYTES } = {}) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > limitBytes) {
+        reject(new Error("Uploaded file is too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      resolve(Buffer.concat(chunks));
+    });
+    req.on("error", reject);
+  });
+}
+
 function isValidProfileName(name) {
   return typeof name === "string" && /^[A-Za-z0-9._@+-]+$/.test(name);
 }
@@ -343,8 +367,8 @@ function pickReleaseAsset(assets = []) {
         (asset) => asset.lowerName.includes("win") && asset.lowerName.endsWith(".zip")
       ]
     : [
-        (asset) => asset.lowerName.includes(`${desiredArch}.dmg`),
-        (asset) => asset.lowerName.includes(`${desiredArch}.zip`),
+        (asset) => asset.lowerName.includes(desiredArch) && asset.lowerName.endsWith(".dmg"),
+        (asset) => asset.lowerName.includes(desiredArch) && asset.lowerName.endsWith(".zip"),
         (asset) => asset.lowerName.endsWith(".dmg"),
         (asset) => asset.lowerName.endsWith(".zip")
       ];
@@ -2535,6 +2559,218 @@ function getProfileDir(name) {
   return path.join(PROFILES_DIR, name);
 }
 
+function toZipPath(...parts) {
+  return parts.filter(Boolean).join("/").replace(/\/+/g, "/");
+}
+
+async function addAuthFileToZip(zip, sourcePath, entryName) {
+  if (!await pathExists(sourcePath)) {
+    return false;
+  }
+  const stat = await fsp.lstat(sourcePath);
+  if (!stat.isFile()) {
+    return false;
+  }
+  zip.addFile(entryName, await fsp.readFile(sourcePath));
+  return true;
+}
+
+async function addAuthDirectoryToZip(zip, sourceDir, entryPrefix) {
+  if (!await pathExists(sourceDir)) {
+    return 0;
+  }
+  const stat = await fsp.lstat(sourceDir);
+  if (!stat.isDirectory()) {
+    return 0;
+  }
+
+  let count = 0;
+  const entries = await fsp.readdir(sourceDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const sourcePath = path.join(sourceDir, entry.name);
+    const zipPath = toZipPath(entryPrefix, entry.name);
+    if (entry.isDirectory()) {
+      count += await addAuthDirectoryToZip(zip, sourcePath, zipPath);
+    } else if (entry.isFile()) {
+      zip.addFile(zipPath, await fsp.readFile(sourcePath));
+      count += 1;
+    }
+  }
+  return count;
+}
+
+async function addAuthPayloadToZip(zip, sourceDir, entryPrefix) {
+  let count = 0;
+  for (const itemName of AUTH_EXPORT_FILES) {
+    if (await addAuthFileToZip(zip, path.join(sourceDir, itemName), toZipPath(entryPrefix, itemName))) {
+      count += 1;
+    }
+  }
+
+  for (const dirName of AUTH_EXPORT_DIRS) {
+    count += await addAuthDirectoryToZip(zip, path.join(sourceDir, dirName), toZipPath(entryPrefix, dirName));
+  }
+  return count;
+}
+
+async function buildAuthExportArchive() {
+  const zip = new AdmZip();
+  const activeProfile = await readCurrentProfile();
+  const profileNames = await listProfileNames();
+  const exportedProfiles = [];
+  let exportedFiles = 0;
+
+  if (await pathExists(ACTIVE_CODEX_DIR)) {
+    exportedFiles += await addAuthPayloadToZip(zip, ACTIVE_CODEX_DIR, ".codex");
+  }
+
+  for (const profileName of profileNames) {
+    const profileDir = getProfileDir(profileName);
+    const count = await addAuthPayloadToZip(zip, profileDir, toZipPath(".codex-profiles", profileName));
+    if (count > 0) {
+      exportedProfiles.push(profileName);
+      exportedFiles += count;
+    }
+  }
+
+  const manifest = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    activeProfile,
+    profiles: exportedProfiles,
+    files: exportedFiles,
+    note: "Contains local Codex auth credentials and profile configuration only. Session history is intentionally excluded."
+  };
+
+  zip.addFile("codex-auth-export-manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8"));
+  zip.addFile("README-WINDOWS.txt", Buffer.from([
+    "Windows restore:",
+    "1. Open Codex Switch and use Import Accounts, or use PowerShell:",
+    "   cd $HOME",
+    "   Expand-Archive \"PATH_TO_THIS_ZIP\" -DestinationPath $HOME -Force",
+    "2. Verify:",
+    "   codex login status",
+    "",
+    "This archive contains Codex auth credentials. Delete it after restoring.",
+    ""
+  ].join("\n"), "utf8"));
+
+  return {
+    buffer: zip.toBuffer(),
+    manifest
+  };
+}
+
+function normalizeZipEntryName(entryName) {
+  const raw = String(entryName || "").replace(/\\/g, "/");
+  if (!raw || raw.startsWith("/") || /^[A-Za-z]:/.test(raw)) {
+    return null;
+  }
+  const normalized = path.posix.normalize(raw).replace(/^\.\//, "");
+  if (!normalized || normalized === "." || normalized.startsWith("../") || normalized.includes("/../")) {
+    return null;
+  }
+  return normalized;
+}
+
+function isAllowedAuthRelativePath(relativePath) {
+  if (AUTH_EXPORT_FILES.includes(relativePath)) {
+    return true;
+  }
+  return AUTH_EXPORT_DIRS.some((dirName) => (
+    relativePath.startsWith(`${dirName}/`) &&
+    relativePath.split("/").every(Boolean)
+  ));
+}
+
+function resolveAuthImportTarget(entryName) {
+  const normalized = normalizeZipEntryName(entryName);
+  if (!normalized) {
+    throw new Error(`Invalid archive path: ${entryName}`);
+  }
+
+  const parts = normalized.split("/");
+  if (parts[0] === ".codex") {
+    const relativePath = parts.slice(1).join("/");
+    if (!isAllowedAuthRelativePath(relativePath)) {
+      return null;
+    }
+    return {
+      targetPath: path.join(ACTIVE_CODEX_DIR, ...parts.slice(1)),
+      profileName: null,
+      active: true
+    };
+  }
+
+  if (parts[0] === ".codex-profiles") {
+    const profileName = parts[1] || "";
+    if (!isValidProfileName(profileName)) {
+      throw new Error(`Invalid profile name in archive: ${profileName || "(empty)"}`);
+    }
+
+    const relativeParts = parts.slice(2);
+    const relativePath = relativeParts.join("/");
+    if (!isAllowedAuthRelativePath(relativePath)) {
+      return null;
+    }
+
+    return {
+      targetPath: path.join(PROFILES_DIR, profileName, ...relativeParts),
+      profileName,
+      active: false
+    };
+  }
+
+  return null;
+}
+
+async function importAuthArchive(buffer) {
+  if (!buffer || buffer.length === 0) {
+    throw new Error("Uploaded archive is empty");
+  }
+
+  const zip = new AdmZip(buffer);
+  const entries = zip.getEntries();
+  if (!entries.length) {
+    throw new Error("Uploaded archive has no files");
+  }
+
+  const importedProfiles = new Set();
+  let importedFiles = 0;
+  let importedActive = false;
+
+  for (const entry of entries) {
+    if (entry.isDirectory) {
+      continue;
+    }
+    const target = resolveAuthImportTarget(entry.entryName);
+    if (!target) {
+      continue;
+    }
+
+    await ensureParentDir(target.targetPath);
+    await fsp.writeFile(target.targetPath, entry.getData());
+    importedFiles += 1;
+    if (target.profileName) {
+      importedProfiles.add(target.profileName);
+    }
+    if (target.active) {
+      importedActive = true;
+    }
+  }
+
+  if (importedFiles === 0) {
+    throw new Error("Archive does not contain supported Codex auth/profile files");
+  }
+
+  return {
+    ok: true,
+    importedFiles,
+    importedActive,
+    importedProfiles: [...importedProfiles].sort()
+  };
+}
+
 function sqlLiteral(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
@@ -3832,6 +4068,42 @@ async function handleApi(req, res, pathname) {
   if (req.method === "POST" && pathname === "/api/app/update/install") {
     const result = await scheduleAppUpdateInstall();
     sendJson(res, result.ok ? 200 : 400, result);
+    return;
+  }
+
+  if (req.method === "GET" && pathname === "/api/auth/export") {
+    const { buffer, manifest } = await buildAuthExportArchive();
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "").replace("T", "-");
+    const filename = `codex-accounts-for-windows-${stamp}.zip`;
+    res.writeHead(200, {
+      "Content-Type": "application/zip",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Content-Length": buffer.length,
+      "Cache-Control": "no-store",
+      "X-Codex-Profile-Count": String(manifest.profiles.length),
+      "X-Codex-Exported-Files": String(manifest.files)
+    });
+    res.end(buffer);
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/auth/import") {
+    const processes = await listCodexProcesses();
+    if (processes.length > 0) {
+      sendJson(res, 409, {
+        ok: false,
+        error: "Codex appears to be running. Close Codex-related processes before importing accounts.",
+        processes
+      });
+      return;
+    }
+
+    const archive = await parseRawBody(req);
+    const result = await importAuthArchive(archive);
+    sendJson(res, 200, {
+      ...result,
+      message: `已导入 ${result.importedProfiles.length} 个 profile，写入 ${result.importedFiles} 个凭证/配置文件`
+    });
     return;
   }
 

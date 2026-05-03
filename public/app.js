@@ -670,7 +670,7 @@ function buildSessionRow(session, projectDesktopState) {
         method: "POST",
         body: { id: session.id }
       });
-      showToast(result.message || "已在 Terminal 打开会话", "success");
+      showToast(result.message || "已在终端打开会话", "success");
     } catch (error) {
       showToast(error.message, "error");
     } finally {
@@ -1052,7 +1052,7 @@ document.querySelector("#startLoginButton").addEventListener("click", async () =
     const ready = await ensureCodexReady("CLI 登录");
     if (!ready) return;
     const result = await api("/api/login/start", { method: "POST" });
-    showToast(result.message || "已打开 Terminal，请在终端里完成 codex login", "success");
+    showToast(result.message || "已打开终端，请在终端里完成 codex login", "success");
   } catch (error) {
     showToast(error.message, "error");
   }
@@ -1063,7 +1063,7 @@ document.querySelector("#startDeviceLoginButton").addEventListener("click", asyn
     const ready = await ensureCodexReady("设备码登录");
     if (!ready) return;
     const result = await api("/api/login/start-device-auth", { method: "POST" });
-    showToast(result.message || "已打开 Terminal，请按设备码流程登录", "success");
+    showToast(result.message || "已打开终端，请按设备码流程登录", "success");
   } catch (error) {
     showToast(error.message, "error");
   }

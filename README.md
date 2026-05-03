@@ -1,16 +1,18 @@
 # Codex Switch
 
-仅适用于 macOS 的 Codex 多账号切换菜单栏 App。
+适用于 macOS 和 Windows 11 的 Codex 多账号切换菜单栏 App。
 
 它会常驻在状态栏，帮你管理本机的 Codex 账号、查看额度、切换账号，并可选显示悬浮额度球。
 
 ## 适用系统
 
-这个项目当前只适用于 `macOS`。
+这个项目当前支持：
 
-- 不支持 Windows
+- macOS
+- Windows 11
 - 不支持 Linux
-- 当前发布包是 `macOS Apple Silicon (arm64)` 版本
+- macOS 发布包目前以 Apple Silicon (arm64) 为主
+- Windows 11 可从源码运行或构建 `x64 / arm64` 安装包
 
 ## 下载
 
@@ -21,7 +23,7 @@
 - [直接下载 DMG](https://github.com/Lsogod/codex-switch-web/releases/download/v0.1.8/Codex-Switch-0.1.8-arm64.dmg)
 - [直接下载 ZIP](https://github.com/Lsogod/codex-switch-web/releases/download/v0.1.8/Codex-Switch-0.1.8-arm64.zip)
 
-当前提供的文件通常有两个：
+macOS 当前提供的文件通常有两个：
 
 - `Codex-Switch-<version>-arm64.dmg`
 - `Codex-Switch-<version>-arm64.zip`
@@ -32,6 +34,18 @@
 
 - 当前发布的是 `macOS Apple Silicon` 版本，也就是 `arm64`
 - 适用于 M1、M2、M3、M4 等芯片的 Mac
+
+Windows 11 可以从源码构建：
+
+```powershell
+npm install
+npm run app:win
+```
+
+构建产物会输出到 `dist`，文件名类似：
+
+- `Codex-Switch-<version>-win-x64.exe`
+- `Codex-Switch-<version>-win-x64.zip`
 
 ## 安装
 
@@ -88,7 +102,7 @@ open -na "/Applications/${APP_NAME}.app"
 
 ## 使用前提
 
-在使用这个 App 之前，请先确认你的 Mac 上已经有这些内容：
+在使用这个 App 之前，请先确认你的电脑上已经有这些内容：
 
 - 已安装 `Codex`
 - 能正常登录和运行 Codex
@@ -120,7 +134,7 @@ open -na "/Applications/${APP_NAME}.app"
 - 你是从源码直接运行这个项目
 - 你想在终端里单独使用 `codex-switch`
 
-本仓库已经包含了 `codex-switch` 脚本，你可以直接安装到 `~/.local/bin`：
+本仓库已经包含了跨平台的 `codex-switch` Node 实现。macOS 可以继续安装兼容脚本到 `~/.local/bin`：
 
 ```bash
 mkdir -p "$HOME/.local/bin"
@@ -145,6 +159,12 @@ export PATH="$HOME/.local/bin:$PATH"
 codex-switch --help
 ```
 
+Windows 11 从源码运行时可以直接使用：
+
+```powershell
+node .\bin\codex-switch.js --help
+```
+
 ## 如何使用
 
 ### 1. 启动 App
@@ -164,7 +184,7 @@ codex-switch --help
 1. 点击状态栏里的 `Codex`
 2. 选择 `打开控制台`
 3. 在控制台里点击 `CLI 登录` 或 `设备码登录`
-4. 按提示在 Terminal 中完成登录
+4. 按提示在终端中完成登录
 5. 登录完成后，App 会把这个账号保存为一个本地 profile
 
 ### 3. 登录更多账号
@@ -248,8 +268,9 @@ codex-switch --help
 
 App 在登录和切换时，可能会调用：
 
-- Terminal
+- Terminal 或 Windows PowerShell
 - Codex
+- Windows Explorer
 
 如果系统请求自动化权限，请允许，否则相关操作可能失败。
 

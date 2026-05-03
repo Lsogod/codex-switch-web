@@ -5,6 +5,7 @@ const path = require("path");
 const os = require("os");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
+const codexSwitchCore = require("./bin/codex-switch-core");
 
 const execFileAsync = promisify(execFile);
 const HOST = "127.0.0.1";
@@ -18,7 +19,7 @@ const PROFILES_DIR = path.join(os.homedir(), ".codex-profiles");
 const ACTIVE_CODEX_DIR = path.join(os.homedir(), ".codex");
 const SHARED_SESSIONS_DIR = path.join(PROFILES_DIR, ".shared-sessions");
 const SHARED_GLOBAL_STATE_PATH = path.join(PROFILES_DIR, ".shared-global-state.json");
-const CODEX_APP_SUPPORT_DIR = path.join(os.homedir(), "Library", "Application Support", "Codex");
+const CODEX_APP_SUPPORT_DIR = getCodexAppSupportDir();
 const CODEX_CACHE_RESET_ITEMS = [
   "Local Storage",
   "Session Storage",
@@ -87,7 +88,7 @@ const appUpdateRuntime = {
   releaseUrl: null,
   downloadUrl: null,
   assetName: null,
-  logPath: path.join(os.homedir(), "Library", "Logs", "Codex Switch Updater.log"),
+  logPath: getUpdaterLogPath(),
   task: null
 };
 const autoSwitchRuntime = {
@@ -107,6 +108,34 @@ const APP_PACKAGE = (() => {
   }
 })();
 const APP_VERSION = typeof APP_PACKAGE.version === "string" ? APP_PACKAGE.version : "0.0.0";
+
+function getWindowsRoamingAppDataDir() {
+  return process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+}
+
+function getWindowsLocalAppDataDir() {
+  return process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+}
+
+function getCodexAppSupportDir() {
+  if (process.platform === "win32") {
+    return path.join(getWindowsRoamingAppDataDir(), "Codex");
+  }
+  if (process.platform === "darwin") {
+    return path.join(os.homedir(), "Library", "Application Support", "Codex");
+  }
+  return path.join(os.homedir(), ".config", "Codex");
+}
+
+function getUpdaterLogPath() {
+  if (process.platform === "win32") {
+    return path.join(getWindowsLocalAppDataDir(), "Codex Switch", "Logs", "Codex Switch Updater.log");
+  }
+  if (process.platform === "darwin") {
+    return path.join(os.homedir(), "Library", "Logs", "Codex Switch Updater.log");
+  }
+  return path.join(os.homedir(), ".local", "state", "codex-switch", "updater.log");
+}
 
 function isExecutableFile(filePath) {
   try {
@@ -299,17 +328,26 @@ function pickReleaseAsset(assets = []) {
     return null;
   }
 
-  const desiredArch = process.arch === "arm64" ? "arm64" : process.arch;
+  const desiredArch = process.arch === "x64" ? "x64" : (process.arch === "arm64" ? "arm64" : process.arch);
   const lowered = assets.map((asset) => ({
     ...asset,
     lowerName: String(asset?.name || "").toLowerCase()
   }));
-  const candidates = [
-    (asset) => asset.lowerName.includes(`${desiredArch}.dmg`),
-    (asset) => asset.lowerName.includes(`${desiredArch}.zip`),
-    (asset) => asset.lowerName.endsWith(".dmg"),
-    (asset) => asset.lowerName.endsWith(".zip")
-  ];
+  const candidates = process.platform === "win32"
+    ? [
+        (asset) => asset.lowerName.includes("win") && asset.lowerName.includes(desiredArch) && asset.lowerName.endsWith(".exe"),
+        (asset) => asset.lowerName.includes("win") && asset.lowerName.includes(desiredArch) && asset.lowerName.endsWith(".msi"),
+        (asset) => asset.lowerName.includes("win") && asset.lowerName.endsWith(".exe"),
+        (asset) => asset.lowerName.endsWith(".exe"),
+        (asset) => asset.lowerName.endsWith(".msi"),
+        (asset) => asset.lowerName.includes("win") && asset.lowerName.endsWith(".zip")
+      ]
+    : [
+        (asset) => asset.lowerName.includes(`${desiredArch}.dmg`),
+        (asset) => asset.lowerName.includes(`${desiredArch}.zip`),
+        (asset) => asset.lowerName.endsWith(".dmg"),
+        (asset) => asset.lowerName.endsWith(".zip")
+      ];
 
   for (const matches of candidates) {
     const found = lowered.find(matches);
@@ -2424,6 +2462,27 @@ function shellQuote(value) {
   return `'${String(value || "").replace(/'/g, `'\\''`)}'`;
 }
 
+function powershellQuote(value) {
+  return `'${String(value || "").replace(/'/g, "''")}'`;
+}
+
+function terminalQuote(value) {
+  return process.platform === "win32" ? powershellQuote(value) : shellQuote(value);
+}
+
+function buildResumeCommand(session) {
+  const commandParts = [];
+  if (session.cwd) {
+    commandParts.push(
+      process.platform === "win32"
+        ? `Set-Location -LiteralPath ${terminalQuote(session.cwd)}`
+        : `cd ${terminalQuote(session.cwd)}`
+    );
+  }
+  commandParts.push(`codex resume --all ${terminalQuote(session.id)}`);
+  return commandParts.join(process.platform === "win32" ? "; " : " && ");
+}
+
 function isHomeRelativePath(targetPath) {
   const normalizedPath = typeof targetPath === "string" ? path.resolve(targetPath) : "";
   if (!normalizedPath) {
@@ -2845,7 +2904,7 @@ async function cleanupOrphanLoginStagingProfiles(activeProfile) {
 
 async function readCurrentProfile() {
   try {
-    const { stdout } = await execFileAsync(getCodexSwitchCommand(), ["current"]);
+    const { stdout } = await codexSwitchCore.run(["current"]);
     return stdout.trim();
   } catch (error) {
     return "unknown";
@@ -2965,19 +3024,18 @@ async function getProfilesState() {
 
 async function runCodexSwitch(args) {
   try {
-    const { stdout, stderr } = await execFileAsync(getCodexSwitchCommand(), args);
+    const { stdout, stderr } = await codexSwitchCore.run(args);
     return {
       ok: true,
-      stdout: stdout.trim(),
-      stderr: stderr.trim()
+      stdout: String(stdout || "").trim(),
+      stderr: String(stderr || "").trim()
     };
   } catch (error) {
-    const missingBinary = error && error.code === "ENOENT";
     return {
       ok: false,
       stdout: String(error.stdout || "").trim(),
       stderr: String(error.stderr || "").trim(),
-      message: missingBinary ? getCodexSwitchInstallHint() : error.message
+      message: error.message || getCodexSwitchInstallHint()
     };
   }
 }
@@ -3098,7 +3156,34 @@ async function autoRegisterActiveProfile() {
 
 async function openMacTarget(targetArgs) {
   try {
-    await execFileAsync("open", targetArgs);
+    if (process.platform === "darwin") {
+      await execFileAsync("open", targetArgs);
+      return { ok: true };
+    }
+
+    if (process.platform === "win32") {
+      if (targetArgs[0] === "-a" && targetArgs[1] === "Codex") {
+        return openWindowsCodexApp();
+      }
+
+      if (targetArgs[0] === "-R" && targetArgs[1]) {
+        await execFileAsync("explorer.exe", [`/select,${targetArgs[1]}`]);
+        return { ok: true };
+      }
+
+      const targetPath = targetArgs[targetArgs.length - 1];
+      if (targetPath) {
+        await execFileAsync("explorer.exe", [targetPath]);
+        return { ok: true };
+      }
+    }
+
+    const targetPath = targetArgs[targetArgs.length - 1];
+    if (targetPath) {
+      await execFileAsync("xdg-open", [targetPath]);
+      return { ok: true };
+    }
+
     return { ok: true };
   } catch (error) {
     return {
@@ -3108,7 +3193,40 @@ async function openMacTarget(targetArgs) {
   }
 }
 
+async function openWindowsCodexApp() {
+  const candidatePaths = [
+    path.join(getWindowsLocalAppDataDir(), "Programs", "Codex", "Codex.exe"),
+    path.join(getWindowsLocalAppDataDir(), "Codex", "Codex.exe"),
+    path.join(process.env.ProgramFiles || "C:\\Program Files", "Codex", "Codex.exe"),
+    path.join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "Codex", "Codex.exe")
+  ];
+
+  for (const candidatePath of candidatePaths) {
+    if (await pathExists(candidatePath)) {
+      await execFileAsync(candidatePath, []);
+      return { ok: true };
+    }
+  }
+
+  await execFileAsync("cmd.exe", ["/d", "/s", "/c", "start", "\"\"", "Codex"]);
+  return { ok: true };
+}
+
 async function openTerminalCommand(command) {
+  if (process.platform === "win32") {
+    const escapedCommand = powershellQuote(command);
+    const script = `Start-Process -FilePath powershell.exe -ArgumentList @('-NoExit','-Command',${escapedCommand})`;
+    try {
+      await execFileAsync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script]);
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error.message
+      };
+    }
+  }
+
   const escaped = command
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"');
@@ -3146,6 +3264,23 @@ async function waitForActiveProfile(expectedProfile) {
 }
 
 function classifyCodexProcess(command) {
+  if (process.platform === "win32") {
+    if (/Codex\.exe/i.test(command) || /(^|\\|\/)codex\.exe/i.test(command)) {
+      return { kind: "desktop", label: "Codex Desktop" };
+    }
+
+    if (/(^|\s)codex(\.cmd|\.ps1|\.exe)?(\s|$)/i.test(command) && !/codex-switch/i.test(command) && !/app-server/i.test(command)) {
+      return { kind: "cli", label: "Codex CLI" };
+    }
+
+    if (/\\Microsoft VS Code\\|\\Code\.exe|(^|\s)Code\.exe/i.test(command)) {
+      return { kind: "vscode-helper", label: "VS Code" };
+    }
+
+    const short = command.split(/\s+/)[0]?.split(/[\\/]/).pop() || "Other process";
+    return { kind: "other", label: `${short} using ~/.codex` };
+  }
+
   if (/\/Applications\/Codex\.app\/Contents\/MacOS\/Codex(?:\s|$)/.test(command)) {
     return { kind: "desktop", label: "Codex Desktop" };
   }
@@ -3172,6 +3307,47 @@ function classifyCodexProcess(command) {
 
 async function listCodexProcesses() {
   try {
+    if (process.platform === "win32") {
+      const psScript = [
+        "$homeCodex = [Regex]::Escape((Join-Path $HOME '.codex'))",
+        "$items = Get-CimInstance Win32_Process | Where-Object {",
+        "  ($_.Name -match '^(codex|Codex|Code|Code - Insiders|electron)\\.exe$') -or",
+        "  ($_.CommandLine -match 'codex') -or",
+        "  ($_.CommandLine -match $homeCodex)",
+        "} | Select-Object ProcessId,Name,CommandLine",
+        "$items | ConvertTo-Json -Compress"
+      ].join("\n");
+      const { stdout } = await execFileAsync("powershell.exe", [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        psScript
+      ], { maxBuffer: 1024 * 1024 * 4 });
+      const raw = String(stdout || "").trim();
+      if (!raw) {
+        return [];
+      }
+      const parsed = JSON.parse(raw);
+      const rows = Array.isArray(parsed) ? parsed : [parsed];
+      return rows
+        .map((row) => {
+          const pid = Number(row.ProcessId);
+          const command = String(row.CommandLine || row.Name || "");
+          if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid || /codex-switch/i.test(command)) {
+            return null;
+          }
+          const classification = classifyCodexProcess(command);
+          return {
+            pid,
+            command,
+            kind: classification.kind,
+            label: classification.label
+          };
+        })
+        .filter(Boolean);
+    }
+
     let lsofStdout = "";
     try {
       const result = await execFileAsync("lsof", ["+D", ACTIVE_CODEX_DIR]);
@@ -3239,6 +3415,31 @@ async function listCodexProcesses() {
 async function closeCodexProcesses() {
   const before = await listCodexProcesses();
   const actions = [];
+
+  if (process.platform === "win32") {
+    for (const processInfo of before) {
+      try {
+        await execFileAsync("taskkill.exe", ["/PID", String(processInfo.pid), "/T", "/F"]);
+        actions.push(`taskkill-pid-${processInfo.pid}`);
+      } catch {}
+    }
+
+    let remaining = await listCodexProcesses();
+    for (let attempt = 0; attempt < PROCESS_POLL_ATTEMPTS; attempt += 1) {
+      await sleep(PROCESS_POLL_DELAY_MS);
+      remaining = await listCodexProcesses();
+      if (remaining.length === 0) {
+        break;
+      }
+    }
+
+    return {
+      ok: remaining.length === 0,
+      actions,
+      before,
+      remaining
+    };
+  }
 
   const hasDesktop = before.some((processInfo) => ["desktop", "desktop-app-server"].includes(processInfo.kind));
   if (hasDesktop) {
@@ -3817,16 +4018,11 @@ async function handleApi(req, res, pathname) {
       return;
     }
 
-    const commandParts = [];
-    if (session.cwd) {
-      commandParts.push(`cd ${shellQuote(session.cwd)}`);
-    }
-    commandParts.push(`codex resume --all ${shellQuote(session.id)}`);
-    const result = await openTerminalCommand(commandParts.join(" && "));
+    const result = await openTerminalCommand(buildResumeCommand(session));
     sendJson(res, result.ok ? 200 : 500, {
       ok: result.ok,
       message: result.ok
-        ? `已在 Terminal 打开会话：${session.title || session.id}`
+        ? `已在终端打开会话：${session.title || session.id}`
         : result.message
     });
     return;
@@ -3890,7 +4086,7 @@ async function handleApi(req, res, pathname) {
     sendJson(res, result.ok ? 200 : 500, {
       ok: result.ok,
       message: result.ok
-        ? (revealMode ? "已在 Finder 中定位到会话文件" : "已打开会话目录")
+        ? (revealMode ? "已在文件管理器中定位到会话文件" : "已打开会话目录")
         : result.message
     });
     return;
@@ -3918,7 +4114,7 @@ async function handleApi(req, res, pathname) {
       message: result.ok
         ? (prepared.changed
             ? `已切到临时登录 profile ${prepared.stagingProfile}，请在终端里完成 codex login`
-            : "已打开 Terminal，请在终端里完成 codex login")
+            : "已打开终端，请在终端里完成 codex login")
         : result.message
     });
     return;
@@ -3940,7 +4136,7 @@ async function handleApi(req, res, pathname) {
       message: result.ok
         ? (prepared.changed
             ? `已切到临时登录 profile ${prepared.stagingProfile}，请按设备码流程登录`
-            : "已打开 Terminal，请按设备码流程登录")
+            : "已打开终端，请按设备码流程登录")
         : result.message
     });
     return;

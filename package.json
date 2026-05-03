@@ -1,6 +1,6 @@
 {
   "name": "codex-switch-web",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "author": "Lsogod",
   "description": "Local Codex multi-account switcher with web and menu bar shells",
@@ -11,7 +11,8 @@
     "app": "electron .",
     "app:dir": "electron-builder --publish never --mac dir",
     "app:dmg": "electron-builder --publish never --mac dmg",
-    "app:dist": "electron-builder --publish never --mac dmg zip"
+    "app:win": "electron-builder --publish never --win nsis zip",
+    "app:dist": "electron-builder --publish never --mac dmg zip --win nsis zip"
   },
   "devDependencies": {
     "electron": "^41.1.0",
@@ -21,7 +22,6 @@
     "appId": "com.lsogod.codexswitch",
     "productName": "Codex Switch",
     "asar": false,
-    "electronDist": "node_modules/electron/dist",
     "directories": {
       "output": "dist"
     },
@@ -49,6 +49,30 @@
           ]
         }
       ]
+    },
+    "win": {
+      "artifactName": "Codex-Switch-${version}-win-${arch}.${ext}",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
     }
   }
 }

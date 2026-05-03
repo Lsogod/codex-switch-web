@@ -66,7 +66,7 @@ function getHealthUrl() {
 }
 
 function getLoginItemOptions() {
-  if (process.platform !== "darwin") {
+  if (!["darwin", "win32"].includes(process.platform)) {
     return {};
   }
 
@@ -81,7 +81,7 @@ function getLoginItemOptions() {
 }
 
 function isLaunchAtLoginEnabled() {
-  if (process.platform !== "darwin") {
+  if (!["darwin", "win32"].includes(process.platform)) {
     return false;
   }
 
@@ -90,7 +90,7 @@ function isLaunchAtLoginEnabled() {
 }
 
 function setLaunchAtLogin(enabled) {
-  if (process.platform !== "darwin") {
+  if (!["darwin", "win32"].includes(process.platform)) {
     return;
   }
 
@@ -465,7 +465,7 @@ function buildContextMenu() {
       type: "checkbox",
       label: "开机自启",
       checked: isLaunchAtLoginEnabled(),
-      enabled: process.platform === "darwin",
+      enabled: ["darwin", "win32"].includes(process.platform),
       click: (menuItem) => {
         setLaunchAtLogin(menuItem.checked);
         refreshTrayMenu();

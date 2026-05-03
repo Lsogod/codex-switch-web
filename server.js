@@ -343,8 +343,18 @@ function getAppBundlePath() {
   return path.dirname(path.dirname(path.dirname(process.execPath)));
 }
 
+function getWindowsAppExePath() {
+  return process.execPath;
+}
+
 function isPackagedAppRuntime() {
-  return process.platform === "darwin" && getAppBundlePath().endsWith(".app");
+  if (process.platform === "darwin") {
+    return getAppBundlePath().endsWith(".app");
+  }
+  if (process.platform === "win32") {
+    return Boolean(process.versions?.electron) && process.defaultApp !== true && path.extname(process.execPath).toLowerCase() === ".exe";
+  }
+  return false;
 }
 
 function pickReleaseAsset(assets = []) {
@@ -1314,6 +1324,77 @@ fi
 `;
 }
 
+function buildWindowsUpdaterScriptContent() {
+  return `param(
+  [Parameter(Mandatory = $true)][int]$ParentPid,
+  [Parameter(Mandatory = $true)][string]$InstallerPath,
+  [Parameter(Mandatory = $true)][string]$AppExePath,
+  [Parameter(Mandatory = $true)][string]$LogPath
+)
+
+$ErrorActionPreference = "Stop"
+
+function Write-UpdateLog {
+  param([string]$Message)
+  try {
+    $directory = Split-Path -Parent $LogPath
+    if ($directory) {
+      New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    Add-Content -LiteralPath $LogPath -Value "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] $Message"
+  } catch {}
+}
+
+try {
+  Write-UpdateLog "updater start"
+  Write-UpdateLog "stopping app pid=$ParentPid"
+  Start-Sleep -Seconds 1
+  try {
+    Stop-Process -Id $ParentPid -Force -ErrorAction SilentlyContinue
+    Wait-Process -Id $ParentPid -Timeout 20 -ErrorAction SilentlyContinue
+  } catch {}
+
+  Write-UpdateLog "running installer: $InstallerPath"
+  $installer = Start-Process -FilePath $InstallerPath -ArgumentList @("/S") -Wait -PassThru
+  if ($installer.ExitCode -ne 0) {
+    throw "installer exited with code $($installer.ExitCode)"
+  }
+
+  $launchPath = $AppExePath
+  if (!(Test-Path -LiteralPath $launchPath)) {
+    $candidates = @()
+    if ($env:LOCALAPPDATA) {
+      $candidates += Join-Path $env:LOCALAPPDATA "Programs\\Codex Switch\\Codex Switch.exe"
+    }
+    if ($env:ProgramFiles) {
+      $candidates += Join-Path $env:ProgramFiles "Codex Switch\\Codex Switch.exe"
+    }
+    if (\${env:ProgramFiles(x86)}) {
+      $candidates += Join-Path \${env:ProgramFiles(x86)} "Codex Switch\\Codex Switch.exe"
+    }
+    $candidates = @($candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
+    if ($candidates.Count -gt 0) {
+      $launchPath = $candidates[0]
+    }
+  }
+
+  if (Test-Path -LiteralPath $launchPath) {
+    Write-UpdateLog "relaunching app: $launchPath"
+    Start-Process -FilePath $launchPath | Out-Null
+  } else {
+    Write-UpdateLog "app executable missing after install: $launchPath"
+  }
+
+  Remove-Item -LiteralPath $InstallerPath -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+  Write-UpdateLog "update complete"
+} catch {
+  Write-UpdateLog ("update failed: " + $_.Exception.Message)
+  exit 1
+}
+`;
+}
+
 async function scheduleAppUpdateInstall() {
   if (appUpdateRuntime.inFlight) {
     return {
@@ -1327,7 +1408,9 @@ async function scheduleAppUpdateInstall() {
   if (!isPackagedAppRuntime()) {
     return {
       ok: false,
-      message: "仅 DMG 安装版支持直接更新替换。"
+      message: process.platform === "win32"
+        ? "仅 Windows 安装版支持直接更新替换。"
+        : "仅 macOS DMG 安装版支持直接更新替换。"
     };
   }
 
@@ -1346,16 +1429,22 @@ async function scheduleAppUpdateInstall() {
     };
   }
 
-  if (!versionState.update.downloadUrl || !String(versionState.update.assetName || "").toLowerCase().endsWith(".dmg")) {
+  const assetName = String(versionState.update.assetName || "");
+  const assetLowerName = assetName.toLowerCase();
+  const expectedAsset = process.platform === "win32" ? ".exe" : ".dmg";
+
+  if (!versionState.update.downloadUrl || !assetLowerName.endsWith(expectedAsset)) {
     return {
       ok: false,
-      message: "没有找到可直接安装的 DMG 更新包。"
+      message: process.platform === "win32"
+        ? "没有找到可直接安装的 Windows EXE 更新包。"
+        : "没有找到可直接安装的 DMG 更新包。"
     };
   }
 
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-switch-update-"));
-  const dmgPath = path.join(tmpDir, versionState.update.assetName);
-  const scriptPath = path.join(tmpDir, "apply-update.zsh");
+  const updatePackagePath = path.join(tmpDir, assetName);
+  const scriptPath = path.join(tmpDir, process.platform === "win32" ? "apply-update.ps1" : "apply-update.zsh");
   const logPath = appUpdateRuntime.logPath;
 
   appUpdateRuntime.inFlight = true;
@@ -1371,18 +1460,42 @@ async function scheduleAppUpdateInstall() {
   appUpdateRuntime.task = (async () => {
     try {
       await appendUpdaterLogLine(`background download start: ${versionState.update.assetName}`);
-      await downloadFile(versionState.update.downloadUrl, dmgPath, { timeoutMs: APP_UPDATE_DOWNLOAD_TIMEOUT_MS });
-      await appendUpdaterLogLine(`background download complete: ${dmgPath}`);
-      await fsp.writeFile(scriptPath, buildUpdaterScriptContent(), { mode: 0o755 });
+      await downloadFile(versionState.update.downloadUrl, updatePackagePath, { timeoutMs: APP_UPDATE_DOWNLOAD_TIMEOUT_MS });
+      await appendUpdaterLogLine(`background download complete: ${updatePackagePath}`);
 
       appUpdateRuntime.phase = "installing";
       appUpdateRuntime.message = `已下载 ${versionState.update.latestVersionLabel || "更新包"}，正在替换应用`;
 
-      const targetAppPath = getAppBundlePath();
-      const child = execFile("/bin/zsh", [scriptPath, String(process.pid), dmgPath, targetAppPath, logPath], {
-        detached: true,
-        stdio: "ignore"
-      });
+      let child;
+      if (process.platform === "win32") {
+        await fsp.writeFile(scriptPath, buildWindowsUpdaterScriptContent(), "utf8");
+        child = execFile("powershell.exe", [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          scriptPath,
+          "-ParentPid",
+          String(process.pid),
+          "-InstallerPath",
+          updatePackagePath,
+          "-AppExePath",
+          getWindowsAppExePath(),
+          "-LogPath",
+          logPath
+        ], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true
+        });
+      } else {
+        await fsp.writeFile(scriptPath, buildUpdaterScriptContent(), { mode: 0o755 });
+        const targetAppPath = getAppBundlePath();
+        child = execFile("/bin/zsh", [scriptPath, String(process.pid), updatePackagePath, targetAppPath, logPath], {
+          detached: true,
+          stdio: "ignore"
+        });
+      }
       child.unref();
 
       appUpdateRuntime.phase = "restarting";

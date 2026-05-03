@@ -12,16 +12,16 @@
 - Windows 11
 - 不支持 Linux
 - macOS 发布包目前以 Apple Silicon (arm64) 为主
-- Windows 11 可从源码运行或构建 `x64 / arm64` 安装包
+- Windows 11 发布包提供 `x64 / arm64` 安装包
 
 ## 下载
 
 请直接从 GitHub Releases 下载最新安装包：
 
 - [Releases](https://github.com/Lsogod/codex-switch-web/releases)
-- [最新版本 v0.1.8](https://github.com/Lsogod/codex-switch-web/releases/tag/v0.1.8)
-- [直接下载 DMG](https://github.com/Lsogod/codex-switch-web/releases/download/v0.1.8/Codex-Switch-0.1.8-arm64.dmg)
-- [直接下载 ZIP](https://github.com/Lsogod/codex-switch-web/releases/download/v0.1.8/Codex-Switch-0.1.8-arm64.zip)
+- [最新版本 v0.1.14](https://github.com/Lsogod/codex-switch-web/releases/tag/v0.1.14)
+- [直接下载 macOS DMG](https://github.com/Lsogod/codex-switch-web/releases/download/v0.1.14/Codex-Switch-0.1.14-arm64.dmg)
+- [直接下载 Windows x64 安装包](https://github.com/Lsogod/codex-switch-web/releases/download/v0.1.14/Codex-Switch-0.1.14-win-x64.exe)
 
 macOS 当前提供的文件通常有两个：
 
@@ -47,6 +47,8 @@ npm run app:win
 - `Codex-Switch-<version>-win-x64.exe`
 - `Codex-Switch-<version>-win-x64.zip`
 
+Windows 11 推荐使用 `.exe` 安装包。安装 `v0.1.14` 或更新版本后，后续可以在 App 内直接安装更新。
+
 ## 安装
 
 1. 下载最新的 `Codex-Switch-<version>-arm64.dmg`
@@ -59,7 +61,7 @@ npm run app:win
 如果你更习惯用命令行，可以直接执行下面这组命令：
 
 ```bash
-VERSION="0.1.8"
+VERSION="0.1.14"
 APP_NAME="Codex Switch"
 DMG_NAME="Codex-Switch-${VERSION}-arm64.dmg"
 DOWNLOAD_DIR="$HOME/Downloads/Codex-Switch"
@@ -122,7 +124,7 @@ open -na "/Applications/${APP_NAME}.app"
 
 这个菜单栏 App 自己不直接改写 `~/.codex`，而是调用 `codex-switch` 来完成底层 profile 切换。
 
-对于通过 `DMG` 安装的版本：
+对于通过 `DMG` 或 Windows `.exe` 安装的版本：
 
 - `codex-switch` 已经随 App 一起打包
 - 不需要你再单独安装一次

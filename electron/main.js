@@ -774,6 +774,13 @@ function syncOverlayUpdateNotice() {
   setOverlayUpdateNoticeVisible(shouldShow).catch(() => {});
 }
 
+function getInstallUpdateDetail() {
+  if (process.platform === "win32") {
+    return "将下载最新 Windows 安装包，退出当前应用，静默安装并自动重启。";
+  }
+  return "将下载最新 DMG，退出当前应用，替换 /Applications 中的安装并自动重启。";
+}
+
 async function checkForUpdatesFromMenu() {
   const snapshot = await updateAppVersionSnapshot({ forceRefresh: true });
   syncOverlayUpdateNotice();
@@ -834,7 +841,7 @@ async function installUpdateFromMenu() {
     defaultId: 0,
     cancelId: 1,
     message: `安装 ${snapshot.update.latestVersionLabel}`,
-    detail: "将下载最新 DMG，退出当前应用，替换 /Applications 中的安装并自动重启。"
+    detail: getInstallUpdateDetail()
   });
 
   if (confirmation.response !== 0) {

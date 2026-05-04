@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Codex Switch Overlay</title>
+    <link rel="stylesheet" href="./overlay.css" />
+  </head>
+  <body>
+    <div class="overlay-shell">
+      <section id="updateBanner" class="update-banner hidden">
+        <span id="updateBannerText" class="update-banner-text">发现新版本</span>
+        <button id="updateBannerButton" class="update-banner-button" type="button">更新</button>
+      </section>
+      <section id="usageBanner" class="usage-banner hidden">
+        <span id="usageBannerText" class="update-banner-text">额度读取异常</span>
+        <button id="usageBannerClose" class="usage-banner-close" type="button" aria-label="关闭提示">x</button>
+      </section>
+      <button id="hideButton" class="control-button" type="button" aria-label="关闭悬浮额度">x</button>
+      <div class="overlay-main">
+        <div class="orb-stack" aria-live="polite">
+          <div class="orb-wrap">
+            <div class="quota-ring">
+              <div class="quota-core">
+                <span id="quotaPercent" class="quota-percent">--%</span>
+                <span id="quotaLabel" class="quota-label">额度</span>
+              </div>
+            </div>
+          </div>
+          <span id="resetTime" class="reset-time">--/-- --:--</span>
+        </div>
+        <section class="info-panel">
+          <span class="info-kicker">当前账号</span>
+          <span id="accountName" class="account-name">读取中</span>
+        </section>
+      </div>
+    </div>
+    <script src="./tauri-bridge.js"></script>
+    <script src="./overlay.js"></script>
+  </body>
+</html>

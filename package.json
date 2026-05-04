@@ -1,6 +1,6 @@
 {
   "name": "codex-switch-web",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "private": true,
   "author": "Lsogod",
   "description": "Local Codex multi-account switcher with web and menu bar shells",
@@ -12,9 +12,12 @@
     "app:dir": "electron-builder --publish never --mac dir",
     "app:dmg": "electron-builder --publish never --mac dmg",
     "app:win": "electron-builder --publish never --win nsis zip",
-    "app:dist": "electron-builder --publish never --mac dmg zip --win nsis zip"
+    "app:dist": "electron-builder --publish never --mac dmg zip --win nsis zip",
+    "tauri:win:dev": "tauri dev",
+    "tauri:win:build": "tauri build"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.0",
     "electron": "^41.1.0",
     "electron-builder": "^26.0.12"
   },
@@ -26,13 +29,16 @@
       "output": "dist"
     },
     "files": [
+      "build/**/*",
       "server.js",
       "bin/**/*",
       "public/**/*",
       "electron/**/*",
       "package.json"
     ],
+    "icon": "build/icon.png",
     "mac": {
+      "icon": "build/icon.icns",
       "category": "public.app-category.developer-tools",
       "artifactName": "Codex-Switch-${version}-${arch}.${ext}",
       "target": [
@@ -51,6 +57,7 @@
       ]
     },
     "win": {
+      "icon": "build/icon.ico",
       "artifactName": "Codex-Switch-${version}-win-${arch}.${ext}",
       "target": [
         {

@@ -30,6 +30,7 @@ let versionLoadInFlight = false;
 let appVersionState = null;
 let sessionsLoadInFlight = false;
 let sessionBrowserState = null;
+let stateLoadPromise = null;
 let lastSeenActiveProfile = null;
 const expandedProfiles = new Set();
 const expandedSessionProjects = new Set();
@@ -465,7 +466,7 @@ function renderProfiles(profiles) {
 
   for (const [index, profile] of visibleProfiles.entries()) {
     const node = profileTemplate.content.firstElementChild.cloneNode(true);
-    const planLabel = String(profile.planType || "-");
+    const planLabel = String(profile.planType || profile.usage?.data?.planType || "-");
     const planTone = planLabel.trim().toLowerCase();
 
     // Strip bar info
@@ -967,6 +968,8 @@ async function ensureCodexReady(actionLabel) {
 }
 
 async function loadState() {
+  if (stateLoadPromise) return stateLoadPromise;
+  stateLoadPromise = (async () => {
   const state = await api("/api/state");
   const activeProfileChanged = lastSeenActiveProfile != null && lastSeenActiveProfile !== state.activeProfile;
   lastSeenActiveProfile = state.activeProfile || "";
@@ -991,6 +994,12 @@ async function loadState() {
     await loadSessionBrowser().catch(() => {});
   }
   return state;
+  })();
+  try {
+    return await stateLoadPromise;
+  } finally {
+    stateLoadPromise = null;
+  }
 }
 
 async function maybeAutoRegister(state, { silent = false } = {}) {

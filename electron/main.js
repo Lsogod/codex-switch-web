@@ -168,6 +168,21 @@ function clampWindowToWorkArea(x, y, width, height) {
 }
 
 function createTrayIcon() {
+  const iconCandidates = [
+    path.join(app.getAppPath(), "build", "tray-icon.png"),
+    path.join(app.getAppPath(), "build", "icon.png")
+  ];
+
+  for (const iconPath of iconCandidates) {
+    const image = nativeImage.createFromPath(iconPath);
+    if (!image.isEmpty()) {
+      return image.resize({
+        width: process.platform === "darwin" ? 18 : 16,
+        height: process.platform === "darwin" ? 18 : 16
+      });
+    }
+  }
+
   const svg = `
     <svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg">
       <rect x="2" y="2.5" width="14" height="13" rx="3.2" fill="black"/>

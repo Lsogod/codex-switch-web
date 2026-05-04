@@ -3,28 +3,29 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Codex Switch Web</title>
+    <title>Codex Switch</title>
     <link rel="stylesheet" href="/styles.css" />
+    <script src="/tauri-bridge.js"></script>
   </head>
   <body>
     <main class="shell">
       <header class="topbar">
         <div class="topbar-left">
           <div class="topbar-heading">
-            <h1 class="topbar-title">Codex 账号切换台</h1>
-            <span class="topbar-badge">Local Control Console</span>
-          </div>
-          <p class="topbar-note">本地多账号登录、额度监控与切换控制</p>
-          <div class="topbar-release">
-            <span id="appVersionChip" class="version-chip">v-</span>
-            <span id="appUpdateStatus" class="topbar-release-status">正在检查更新…</span>
-            <button id="checkUpdateButton" class="btn btn-xs btn-secondary" type="button">检查更新</button>
-            <button id="installUpdateButton" class="btn btn-xs btn-primary hidden" type="button">安装更新</button>
+            <span class="app-mark">C</span>
+            <div>
+              <h1 class="topbar-title">Codex 账号切换台</h1>
+              <div class="topbar-release">
+                <span id="appVersionChip" class="version-chip">v-</span>
+                <span id="appUpdateStatus" class="topbar-release-status">正在检查更新…</span>
+              </div>
+            </div>
           </div>
         </div>
+
         <div class="topbar-right">
           <div class="topbar-stat">
-            <span class="topbar-stat-label">当前 Profile</span>
+            <span class="topbar-stat-label">Profile</span>
             <strong id="activeProfile">加载中</strong>
           </div>
           <div class="topbar-stat">
@@ -72,9 +73,11 @@
             导入账号
           </button>
           <input id="importAccountsInput" class="hidden" type="file" accept=".zip,application/zip,application/x-zip-compressed" />
+          <button id="checkUpdateButton" class="btn btn-secondary" type="button">检查更新</button>
+          <button id="installUpdateButton" class="btn btn-primary hidden" type="button">安装更新</button>
           <button id="logoutButton" class="btn btn-ghost btn-danger" type="button">登出</button>
         </div>
-        <div class="toolbar-divider"></div>
+
         <div class="toolbar-switch">
           <div class="switch-info">
             <strong id="autoSwitchTitle">自动切号未启用</strong>
@@ -91,8 +94,10 @@
 
       <section class="profiles-section">
         <div class="section-head">
-          <h2>账号列表</h2>
-          <small class="muted" id="profilesDir">加载中</small>
+          <div>
+            <h2>账号列表</h2>
+            <small class="muted" id="profilesDir">加载中</small>
+          </div>
         </div>
         <div id="profilesGrid" class="profiles-list"></div>
       </section>
@@ -104,11 +109,10 @@
             <small class="muted" id="sessionsSummary">加载中</small>
           </div>
           <div class="sessions-toolbar">
-            <input id="sessionSearchInput" class="text-input" type="search" placeholder="按项目、标题、路径或 ID 筛选" />
-            <button id="refreshSessionsButton" class="btn btn-xs btn-secondary" type="button">刷新会话</button>
+            <input id="sessionSearchInput" class="text-input" type="search" placeholder="搜索项目、标题、路径或 ID" />
+            <button id="refreshSessionsButton" class="btn btn-secondary" type="button">刷新会话</button>
           </div>
         </div>
-        <p class="section-help">这里按项目列出共享会话库里的全部 session，并显示来源、是否位于共享库前100，以及“项目根”和“最新线程 cwd”是否对齐。这里不再按 VSCode 或 CLI 来源推测桌面 App 可见性。</p>
         <div id="sessionProjectsList" class="session-projects"></div>
       </section>
 
@@ -140,7 +144,7 @@
             <span class="strip-reset-label muted">--</span>
           </div>
           <div class="strip-actions">
-            <button class="btn btn-sm btn-primary use-button">
+            <button class="btn btn-sm btn-primary use-button" type="button">
               <svg class="btn-icon" viewBox="0 0 16 16" fill="none"><path d="M6 3l5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
               切换
             </button>
